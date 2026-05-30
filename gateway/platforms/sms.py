@@ -22,6 +22,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import urllib.parse
@@ -42,6 +43,17 @@ TWILIO_API_BASE = "https://api.twilio.com/2010-04-01/Accounts"
 MAX_SMS_LENGTH = 1600  # ~10 SMS segments
 DEFAULT_WEBHOOK_PORT = 8080
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True only for loopback-only bind hosts."""
+    normalized = (host or "").strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def check_sms_requirements() -> bool:
@@ -111,11 +123,24 @@ class SmsAdapter(BasePlatformAdapter):
             return False
 
         if insecure_no_sig and not self._webhook_url:
+            if not _is_loopback_host(self._webhook_host):
+                msg = (
+                    "[sms] Refusing to start: SMS_INSECURE_NO_SIGNATURE=true "
+                    "without SMS_WEBHOOK_URL is only allowed on loopback hosts. "
+                    f"Current SMS_WEBHOOK_HOST={self._webhook_host!r} would expose "
+                    "an unsigned Twilio webhook listener."
+                )
+                logger.error(msg)
+                self._set_fatal_error(
+                    "sms_insecure_public_bind",
+                    msg,
+                    retryable=False,
+                )
+                return False
             logger.warning(
                 "[sms] SMS_INSECURE_NO_SIGNATURE=true — Twilio signature validation "
-                "is DISABLED. Any client that can reach port %d can inject messages. "
-                "Do NOT use this in production.",
-                self._webhook_port,
+                "is DISABLED for loopback-only local development. Do NOT use this "
+                "in production."
             )
 
         app = web.Application()
@@ -304,7 +329,10 @@ class SmsAdapter(BasePlatformAdapter):
                 status=400,
             )
 
-        # Validate Twilio request signature when SMS_WEBHOOK_URL is configured
+        # Validate Twilio request signature when SMS_WEBHOOK_URL is configured.
+        # Without a URL, unsigned webhook handling is allowed only for explicit
+        # loopback-bound local development. Keep this check in the handler too
+        # so tests and future setup paths cannot bypass the startup guard.
         if self._webhook_url:
             twilio_sig = request.headers.get("X-Twilio-Signature", "")
             if not twilio_sig:
@@ -319,6 +347,20 @@ class SmsAdapter(BasePlatformAdapter):
                 self._webhook_url, flat_params, twilio_sig
             ):
                 logger.warning("[sms] Rejected: invalid Twilio signature")
+                return web.Response(
+                    text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    content_type="application/xml",
+                    status=403,
+                )
+        else:
+            insecure_no_sig = (
+                os.getenv("SMS_INSECURE_NO_SIGNATURE", "").lower() == "true"
+            )
+            if not insecure_no_sig or not _is_loopback_host(self._webhook_host):
+                logger.warning(
+                    "[sms] Rejected unsigned webhook without SMS_WEBHOOK_URL; "
+                    "set SMS_WEBHOOK_URL for Twilio signature validation."
+                )
                 return web.Response(
                     text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                     content_type="application/xml",

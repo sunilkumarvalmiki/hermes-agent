@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import os
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -300,6 +301,20 @@ class TestStartupGuard:
             await adapter.disconnect()
 
     @pytest.mark.asyncio
+    async def test_insecure_flag_rejects_public_bind_without_url(self):
+        env = {
+            "SMS_INSECURE_NO_SIGNATURE": "true",
+            "SMS_WEBHOOK_HOST": "0.0.0.0",
+        }
+        with patch.dict(os.environ, env):
+            adapter = self._make_adapter()
+            result = await adapter.connect()
+        assert result is False
+        assert adapter.has_fatal_error is True
+        assert adapter.fatal_error_retryable is False
+        assert adapter.fatal_error_code == "sms_insecure_public_bind"
+
+    @pytest.mark.asyncio
     async def test_webhook_url_allows_start(self):
         mock_session = AsyncMock()
         with patch("aiohttp.web.AppRunner") as mock_runner_cls, \
@@ -467,14 +482,39 @@ class TestWebhookSignatureEnforcement:
 
     @pytest.mark.asyncio
     async def test_insecure_flag_skips_validation(self):
-        """With SMS_INSECURE_NO_SIGNATURE=true and no URL, requests are accepted."""
+        """Loopback-only dev mode accepts unsigned requests without a URL."""
         env = {"SMS_INSECURE_NO_SIGNATURE": "true"}
         with patch.dict(os.environ, env):
             adapter = self._make_adapter(webhook_url="")
+            adapter.handle_message = AsyncMock()
+            body = b"From=%2B15551234567&To=%2B15550001111&Body=hello&MessageSid=SM123"
+            request = self._mock_request(body)
+            resp = await adapter._handle_webhook(request)
+        assert resp.status == 200
+        await asyncio.sleep(0)
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_url_without_insecure_flag_rejects_unsigned_and_does_not_dispatch(self):
+        adapter = self._make_adapter(webhook_url="")
+        adapter.handle_message = AsyncMock()
         body = b"From=%2B15551234567&To=%2B15550001111&Body=hello&MessageSid=SM123"
         request = self._mock_request(body)
         resp = await adapter._handle_webhook(request)
-        assert resp.status == 200
+        assert resp.status == 403
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_public_insecure_flag_rejects_unsigned_and_does_not_dispatch(self):
+        env = {"SMS_INSECURE_NO_SIGNATURE": "true", "SMS_WEBHOOK_HOST": "0.0.0.0"}
+        with patch.dict(os.environ, env):
+            adapter = self._make_adapter(webhook_url="")
+            adapter.handle_message = AsyncMock()
+            body = b"From=%2B15551234567&To=%2B15550001111&Body=hello&MessageSid=SM123"
+            request = self._mock_request(body)
+            resp = await adapter._handle_webhook(request)
+        assert resp.status == 403
+        adapter.handle_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_insecure_flag_with_url_still_validates(self):
