@@ -1232,21 +1232,22 @@ Subcommands:
 
 | Subcommand | Description |
 |------------|-------------|
-| `install` | Run the upstream cua-driver installer (macOS only). |
-| `install --upgrade` | Re-run the installer even if cua-driver is already on PATH. The upstream script always pulls the latest release, so this performs an in-place upgrade. |
+| `install` | Install the pinned, checksum-verified cua-driver release asset (macOS only). |
+| `install --upgrade` | Re-run the pinned installer even if cua-driver is already on PATH. |
 | `status` | Print whether `cua-driver` is on `$PATH` and which version is installed. |
 
 `hermes computer-use install` is the stable entry point for installing the
 [cua-driver](https://github.com/trycua/cua) binary used by the
-`computer_use` toolset. It runs the same upstream installer that
+`computer_use` toolset. It downloads the pinned release archive, verifies
+its SHA256 digest, and runs the same local install path that
 `hermes tools` invokes when you first enable Computer Use, so it's safe
 to use for re-running the install if the toolset toggle didn't trigger
 it (for example, on returning-user setups).
 
-`hermes update` automatically re-runs the upstream installer at the end
+`hermes update` automatically re-runs the pinned installer at the end
 of the update if cua-driver is on PATH, so most users will not need to
-call `--upgrade` manually. Use it when upstream ships a fix you want
-right now without waiting for the next Hermes update.
+call `--upgrade` manually. Use it after Hermes updates its pinned driver
+version and you want that driver refreshed immediately.
 
 ## `hermes sessions`
 

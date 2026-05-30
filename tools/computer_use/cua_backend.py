@@ -4,7 +4,7 @@ Speaks MCP over stdio to `cua-driver`. The Python `mcp` SDK is async, so we
 run a dedicated asyncio event loop on a background thread and marshal sync
 calls through it.
 
-Install: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)"`
+Install: `hermes computer-use install`
 
 After install, `cua-driver` is on $PATH and supports `cua-driver mcp` (stdio
 transport) which is what we invoke.
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # Version pinning
 # ---------------------------------------------------------------------------
 
-PINNED_CUA_DRIVER_VERSION = os.environ.get("HERMES_CUA_DRIVER_VERSION", "0.5.0")
+PINNED_CUA_DRIVER_VERSION = os.environ.get("HERMES_CUA_DRIVER_VERSION", "0.3.4")
 
 _CUA_DRIVER_CMD = os.environ.get("HERMES_CUA_DRIVER_CMD", "cua-driver")
 _CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP transport
@@ -85,11 +85,8 @@ def cua_driver_binary_available() -> bool:
 
 def cua_driver_install_hint() -> str:
     return (
-        "cua-driver is not installed. Install with one of:\n"
+        "cua-driver is not installed. Install with:\n"
         "  hermes computer-use install\n"
-        "Or run the upstream installer directly:\n"
-        '  /bin/bash -c "$(curl -fsSL '
-        'https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)"\n'
         "Or run `hermes tools` and enable the Computer Use toolset to install it automatically."
     )
 

@@ -193,7 +193,7 @@ your conversation context.
 ## Failure modes
 
 - **"cua-driver not installed"** — Run `hermes tools` and enable Computer
-  Use; the setup will install cua-driver via its upstream script. Requires
+  Use; the setup will install the pinned, checksum-verified cua-driver asset. Requires
   macOS + Accessibility + Screen Recording permissions.
 - **Element index stale** — SOM indices come from the last `capture` call.
   If the UI shifted (new tab opened, dialog appeared), re-capture before

@@ -16,7 +16,7 @@ Hermes Agent 可以在**后台**驱动你的 Mac 桌面——点击、输入、�
 
 ## 启用
 
-选择最方便的方式——两种方式运行的是同一个上游安装程序：
+选择最方便的方式——两种方式都使用同一个已固定版本并校验 SHA256 的发布资源：
 
 **方式一：使用专用 CLI 命令（最直接）。**
 
@@ -24,14 +24,13 @@ Hermes Agent 可以在**后台**驱动你的 Mac 桌面——点击、输入、�
 hermes computer-use install
 ```
 
-此命令会获取并运行上游 cua-driver 安装脚本：
-`curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh`。
+此命令会下载已固定的 cua-driver 发布归档，校验 SHA256，安装 `CuaDriver.app`，并默认将 `cua-driver` 链接到 `~/.local/bin`。
 使用 `hermes computer-use status` 验证安装结果。
 
 **方式二：通过交互式界面启用工具集。**
 
 1. 运行 `hermes tools`，选择 `🖱️ Computer Use (macOS)` → `cua-driver (background)`。
-2. 安装程序将运行上游安装脚本（与方式一相同）。
+2. 安装程序将运行已固定版本的安装流程（与方式一相同）。
 
 安装完成后，无论采用哪种方式，继续执行以下步骤：
 
@@ -48,8 +47,8 @@ hermes computer-use install
 
 cua-driver 项目会定期发布修复（例如 v0.1.6 修复了 UTM 工作流中的 Safari 窗口焦点问题）。Hermes 在两处刷新二进制文件，避免你停留在过时版本：
 
-- **`hermes update`** — 更新 Hermes 本身时，如果 `cua-driver` 在 PATH 中，更新结束时会重新运行上游安装程序。对非 macOS 用户及未安装 cua-driver 的用户无操作。
-- **`hermes computer-use install --upgrade`** — 手动强制刷新。无论 cua-driver 是否已安装，都会重新运行上游安装程序。在不等待下次 Agent 更新的情况下获取最新修复时使用此命令。
+- **`hermes update`** — 更新 Hermes 本身时，如果 `cua-driver` 在 PATH 中，更新结束时会重新运行已固定版本的安装流程。对非 macOS 用户及未安装 cua-driver 的用户无操作。
+- **`hermes computer-use install --upgrade`** — 手动强制刷新。无论 cua-driver 是否已安装，都会重新运行已固定版本的安装流程。当 Hermes 更新了固定的驱动版本后，可用此命令立即刷新。
 
 `hermes computer-use status` 会在二进制路径旁显示已安装的版本号。
 

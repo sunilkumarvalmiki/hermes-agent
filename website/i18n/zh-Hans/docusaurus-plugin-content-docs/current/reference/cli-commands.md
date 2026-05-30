@@ -1050,13 +1050,13 @@ hermes computer-use <subcommand>
 
 | 子命令 | 说明 |
 |------------|-------------|
-| `install` | 运行上游 cua-driver 安装程序（仅 macOS）。 |
-| `install --upgrade` | 即使 cua-driver 已在 PATH 中也重新运行安装程序。上游脚本始终拉取最新版本，因此这会执行原地升级。 |
+| `install` | 安装已固定版本并校验 SHA256 的 cua-driver 发布资源（仅 macOS）。 |
+| `install --upgrade` | 即使 cua-driver 已在 PATH 中也重新运行已固定版本的安装流程。 |
 | `status` | 打印 `cua-driver` 是否在 `$PATH` 中以及已安装的版本。 |
 
-`hermes computer-use install` 是安装 `computer_use` toolset 使用的 [cua-driver](https://github.com/trycua/cua) 二进制文件的稳定入口。它运行与首次启用 Computer Use 时 `hermes tools` 调用的相同上游安装程序，因此如果 toolset 切换未触发安装（例如在已配置用户的设置中），可以安全地用于重新运行安装。
+`hermes computer-use install` 是安装 `computer_use` toolset 使用的 [cua-driver](https://github.com/trycua/cua) 二进制文件的稳定入口。它会下载已固定的发布归档、校验 SHA256，并运行与首次启用 Computer Use 时 `hermes tools` 调用的相同本地安装流程，因此如果 toolset 切换未触发安装（例如在已配置用户的设置中），可以安全地用于重新运行安装。
 
-`hermes update` 在更新结束时，如果 cua-driver 在 PATH 中，会自动重新运行上游安装程序，因此大多数用户不需要手动调用 `--upgrade`。当上游发布了你现在就想要的修复，而不想等待下次 Hermes 更新时，使用此选项。
+`hermes update` 在更新结束时，如果 cua-driver 在 PATH 中，会自动重新运行已固定版本的安装流程，因此大多数用户不需要手动调用 `--upgrade`。当 Hermes 更新了固定的驱动版本且你想立即刷新本机驱动时，使用此选项。
 
 ## `hermes sessions`
 

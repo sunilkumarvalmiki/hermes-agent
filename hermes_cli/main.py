@@ -9667,11 +9667,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
             logger.debug("FHS PATH guard check failed: %s", e)
 
         # Refresh the cua-driver binary used by the Computer Use toolset.
-        # The upstream installer is gated on macOS and on the binary already
+        # The pinned installer is gated on macOS and on the binary already
         # being on PATH, so this is a no-op for users who don't have it.
         # Tying the refresh to ``hermes update`` gives users a predictable
         # cadence (matches when they pull new agent code) without adding
-        # startup latency or a per-launch GitHub API call.
+        # startup latency or a per-launch network check.
         try:
             if sys.platform == "darwin" and shutil.which("cua-driver"):
                 from hermes_cli.tools_config import install_cua_driver
@@ -13414,8 +13414,8 @@ Examples:
         description=(
             "Install or check the cua-driver binary used by the\n"
             "`computer_use` toolset. macOS-only.\n\n"
-            "Use `hermes computer-use install` to fetch and run the\n"
-            "upstream cua-driver installer. This is equivalent to the\n"
+            "Use `hermes computer-use install` to fetch and verify the\n"
+            "pinned cua-driver release asset. This is equivalent to the\n"
             "post-setup hook that `hermes tools` runs when you first\n"
             "enable the Computer Use toolset, and is a stable target\n"
             "for re-running the install if it didn't fire (e.g. when\n"
@@ -13432,9 +13432,8 @@ Examples:
         "--upgrade",
         action="store_true",
         help=(
-            "Re-run the upstream installer even if cua-driver is already on "
-            "PATH. The upstream install.sh always pulls the latest release, "
-            "so this performs an in-place upgrade."
+            "Re-run the pinned installer even if cua-driver is already on "
+            "PATH. Hermes verifies the pinned release asset before installing."
         ),
     )
     computer_use_sub.add_parser(

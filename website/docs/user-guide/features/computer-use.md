@@ -27,7 +27,7 @@ cua-driver is the open-source equivalent.
 
 ## Enabling
 
-Pick whichever path is most convenient — both run the same upstream installer:
+Pick whichever path is most convenient — both use the same pinned, checksum-verified release asset:
 
 **Option 1: dedicated CLI command (most direct).**
 
@@ -35,14 +35,14 @@ Pick whichever path is most convenient — both run the same upstream installer:
 hermes computer-use install
 ```
 
-This fetches and runs the upstream cua-driver installer:
-`curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh`.
+This downloads the pinned cua-driver release archive, verifies its SHA256 digest,
+installs `CuaDriver.app`, and symlinks `cua-driver` into `~/.local/bin` by default.
 Use `hermes computer-use status` to verify the install.
 
 **Option 2: enable the toolset interactively.**
 
 1. Run `hermes tools`, pick `🖱️ Computer Use (macOS)` → `cua-driver (background)`.
-2. The setup runs the upstream installer (same as Option 1).
+2. The setup runs the pinned installer (same as Option 1).
 
 After installing, regardless of which path you took:
 
@@ -64,12 +64,11 @@ window-focus bug for UTM workflows). Hermes refreshes the binary in two
 places so you don't get stuck on a stale release:
 
 - **`hermes update`** — when you update Hermes itself, if `cua-driver` is
-  on PATH the upstream installer re-runs at the end of the update.
+  on PATH the pinned installer re-runs at the end of the update.
   No-op for non-macOS users and for users without cua-driver installed.
 - **`hermes computer-use install --upgrade`** — manual force-refresh.
-  Re-runs the upstream installer regardless of whether cua-driver is
-  already installed. Use this when you want the latest fix without
-  waiting for the next agent update.
+  Re-runs the pinned installer regardless of whether cua-driver is
+  already installed. Use this after Hermes updates its pinned driver version.
 
 `hermes computer-use status` shows the installed version next to the
 binary path.

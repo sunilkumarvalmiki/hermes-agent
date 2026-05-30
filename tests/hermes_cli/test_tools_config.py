@@ -969,19 +969,18 @@ def test_computer_use_post_setup_missing_override_does_not_accept_default_binary
         seen.append(name)
         if name == "cua-driver":
             return "/usr/local/bin/cua-driver"
-        if name == "curl":
-            return None
         return None
 
     with patch.dict("os.environ", {"HERMES_CUA_DRIVER_CMD": "custom-cua"}), \
          patch("platform.system", return_value="Darwin"), \
          patch("shutil.which", side_effect=fake_which), \
+         patch("hermes_cli.tools_config._run_cua_driver_installer") as installer, \
          patch("subprocess.run") as run:
         _run_post_setup("cua_driver")
 
     run.assert_not_called()
+    installer.assert_not_called()
     assert "custom-cua" in seen
-    assert "curl" in seen
 
 
 class TestImagegenBackendRegistry:
