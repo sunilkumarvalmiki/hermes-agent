@@ -1,4 +1,6 @@
 """Tests for the BlueBubbles iMessage gateway adapter."""
+import json
+
 import pytest
 
 from gateway.config import Platform, PlatformConfig
@@ -25,6 +27,11 @@ class TestBlueBubblesConfigLoading:
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
         monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
         monkeypatch.setenv("BLUEBUBBLES_WEBHOOK_PORT", "9999")
+        monkeypatch.setenv("BLUEBUBBLES_WEBHOOK_SECRET", "webhook-secret")
+        monkeypatch.setenv(
+            "BLUEBUBBLES_WEBHOOK_PUBLIC_URL",
+            "https://hooks.example.test/hermes-bluebubbles",
+        )
         from gateway.config import GatewayConfig, _apply_env_overrides
 
         config = GatewayConfig()
@@ -35,6 +42,11 @@ class TestBlueBubblesConfigLoading:
         assert bc.extra["server_url"] == "http://localhost:1234"
         assert bc.extra["password"] == "secret"
         assert bc.extra["webhook_port"] == 9999
+        assert bc.extra["webhook_secret"] == "webhook-secret"
+        assert (
+            bc.extra["webhook_public_url"]
+            == "https://hooks.example.test/hermes-bluebubbles"
+        )
 
     def test_home_channel_set_from_env(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
@@ -470,6 +482,173 @@ class TestBlueBubblesWebhookUrl:
         adapter = BlueBubblesAdapter(cfg)
         assert adapter._webhook_register_url == adapter._webhook_url
 
+    def test_non_loopback_register_url_uses_dedicated_path_secret(self, monkeypatch):
+        """Public callbacks must not expose the BlueBubbles API password."""
+        adapter = _make_adapter(
+            monkeypatch,
+            password="api-password",
+            webhook_secret="webhook-secret",
+            webhook_public_url="https://hooks.example.test/hermes-bluebubbles",
+        )
+
+        assert adapter._webhook_registration_security_error() is None
+        assert adapter._webhook_register_url == (
+            "https://hooks.example.test/hermes-bluebubbles/webhook-secret"
+        )
+        assert "api-password" not in adapter._webhook_register_url
+        assert "password=" not in adapter._webhook_register_url
+
+    def test_non_loopback_register_url_requires_https(self, monkeypatch):
+        """Non-loopback callback URLs carrying webhook secrets must be HTTPS."""
+        adapter = _make_adapter(
+            monkeypatch,
+            password="api-password",
+            webhook_secret="webhook-secret",
+            webhook_host="192.0.2.10",
+        )
+
+        assert "HTTPS" in (adapter._webhook_registration_security_error() or "")
+
+    def test_non_loopback_register_url_rejects_api_password_secret(self, monkeypatch):
+        """The webhook bearer secret must be separate from the API password."""
+        adapter = _make_adapter(
+            monkeypatch,
+            password="same-secret",
+            webhook_secret="same-secret",
+            webhook_public_url="https://hooks.example.test/hermes-bluebubbles",
+        )
+
+        assert "separate" in (adapter._webhook_registration_security_error() or "")
+
+    def test_register_url_for_log_masks_path_secret(self, monkeypatch):
+        """Log-safe webhook URLs must mask dedicated path secrets."""
+        adapter = _make_adapter(
+            monkeypatch,
+            password="api-password",
+            webhook_secret="W9fTC&L5JL*@",
+            webhook_public_url="https://hooks.example.test/hermes-bluebubbles",
+        )
+
+        safe_url = adapter._webhook_register_url_for_log
+        assert safe_url.endswith("/***")
+        assert "W9fTC" not in safe_url
+        assert "api-password" not in safe_url
+
+
+class TestBlueBubblesWebhookAuth:
+    @staticmethod
+    def _payload(message_guid="MESSAGE-GUID"):
+        return {
+            "type": "new-message",
+            "data": {
+                "guid": message_guid,
+                "text": "hello",
+                "handle": {"address": "user@example.com"},
+                "isFromMe": False,
+                "chatGuid": "iMessage;-;user@example.com",
+                "chatIdentifier": "user@example.com",
+            },
+        }
+
+    @staticmethod
+    def _request(payload, *, query=None, headers=None, match_info=None):
+        class Request:
+            def __init__(self):
+                self.query = query or {}
+                self.headers = headers or {}
+                self.match_info = match_info or {}
+
+            async def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        return Request()
+
+    @pytest.mark.asyncio
+    async def test_webhook_secret_path_required_when_configured(self, monkeypatch):
+        """A configured webhook secret disables replayable API-password query auth."""
+        adapter = _make_adapter(
+            monkeypatch,
+            password="api-password",
+            webhook_secret="webhook-secret",
+            webhook_public_url="https://hooks.example.test/hermes-bluebubbles",
+        )
+        events = []
+
+        async def handle(event):
+            events.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", handle)
+
+        response = await adapter._handle_webhook(
+            self._request(self._payload(), query={"password": "api-password"})
+        )
+        await asyncio_sleep()
+
+        assert response.status == 401
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_webhook_secret_path_accepts_message(self, monkeypatch):
+        """The registered path secret authenticates an inbound webhook."""
+        adapter = _make_adapter(
+            monkeypatch,
+            password="api-password",
+            webhook_secret="webhook-secret",
+            webhook_public_url="https://hooks.example.test/hermes-bluebubbles",
+        )
+        events = []
+
+        async def handle(event):
+            events.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", handle)
+
+        response = await adapter._handle_webhook(
+            self._request(
+                self._payload(),
+                match_info={"webhook_secret": "webhook-secret"},
+            )
+        )
+        await asyncio_sleep()
+
+        assert response.status == 200
+        assert len(events) == 1
+        assert events[0].source.user_id == "user@example.com"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_webhook_message_id_is_not_dispatched_twice(self, monkeypatch):
+        """Exact webhook replay with the same message GUID is acknowledged and dropped."""
+        adapter = _make_adapter(
+            monkeypatch,
+            password="api-password",
+            webhook_secret="webhook-secret",
+            webhook_public_url="https://hooks.example.test/hermes-bluebubbles",
+        )
+        events = []
+
+        async def handle(event):
+            events.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", handle)
+        request = self._request(
+            self._payload(message_guid="REPLAY-GUID"),
+            match_info={"webhook_secret": "webhook-secret"},
+        )
+
+        first = await adapter._handle_webhook(request)
+        second = await adapter._handle_webhook(request)
+        await asyncio_sleep()
+
+        assert first.status == 200
+        assert second.status == 200
+        assert len(events) == 1
+
+
+async def asyncio_sleep():
+    import asyncio
+
+    await asyncio.sleep(0)
+
 
 class TestBlueBubblesWebhookRegistration:
     """Tests for _register_webhook, _unregister_webhook, _find_registered_webhooks."""
@@ -615,6 +794,30 @@ class TestBlueBubblesWebhookRegistration:
             adapter._register_webhook()
         )
         assert ok is False
+
+    def test_register_refuses_unsafe_non_loopback_callback(self, monkeypatch):
+        import asyncio
+        adapter = _make_adapter(
+            monkeypatch,
+            webhook_host="192.0.2.10",
+            webhook_secret="webhook-secret",
+        )
+        post_called = False
+
+        async def tracking_post(path, payload):
+            nonlocal post_called
+            post_called = True
+            return {"status": 200, "data": {}}
+
+        adapter.client = self._mock_client()
+        adapter._api_post = tracking_post
+
+        ok = asyncio.get_event_loop().run_until_complete(
+            adapter._register_webhook()
+        )
+
+        assert ok is False
+        assert post_called is False
 
     def test_register_returns_false_on_server_error(self, monkeypatch):
         import asyncio

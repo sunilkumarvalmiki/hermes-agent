@@ -87,11 +87,15 @@ Hermes → BlueBubbles REST API → Messages.app → iMessage
 | `BLUEBUBBLES_WEBHOOK_HOST` | 否 | `127.0.0.1` | Webhook 监听器绑定地址 |
 | `BLUEBUBBLES_WEBHOOK_PORT` | 否 | `8645` | Webhook 监听器端口 |
 | `BLUEBUBBLES_WEBHOOK_PATH` | 否 | `/bluebubbles-webhook` | Webhook URL 路径 |
+| `BLUEBUBBLES_WEBHOOK_SECRET` | 非回环回调需要 | — | 专用 webhook 密钥，必须不同于 `BLUEBUBBLES_PASSWORD` |
+| `BLUEBUBBLES_WEBHOOK_PUBLIC_URL` | 公网/隧道回调需要 | — | 注册到 BlueBubbles 的 HTTPS URL；Hermes 会把 webhook 密钥追加为路径段 |
 | `BLUEBUBBLES_HOME_CHANNEL` | 否 | — | cron 投递使用的手机号/邮箱 |
 | `BLUEBUBBLES_ALLOWED_USERS` | 否 | — | 逗号分隔的授权用户列表 |
 | `BLUEBUBBLES_ALLOW_ALL_USERS` | 否 | `false` | 允许所有用户 |
 
 自动将消息标记为已读由 `~/.hermes/config.yaml` 中 `platforms.bluebubbles.extra` 下的 `send_read_receipts` 键控制（默认值：`true`）。该选项没有对应的环境变量。
+
+默认回环监听之外的部署应设置 `BLUEBUBBLES_WEBHOOK_PUBLIC_URL` 为 HTTPS URL，并设置随机的 `BLUEBUBBLES_WEBHOOK_SECRET`，且不要与 BlueBubbles 服务端密码相同。Hermes 会拒绝非回环 HTTP webhook 注册，并且不会再把 BlueBubbles API 密码放入公网回调 URL。
 
 ## 功能特性
 

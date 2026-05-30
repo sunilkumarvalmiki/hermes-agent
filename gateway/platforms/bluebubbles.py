@@ -9,14 +9,17 @@ downloading from PR #4588 (YuhangLin).
 """
 
 import asyncio
+import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -42,6 +45,8 @@ DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8645
 DEFAULT_WEBHOOK_PATH = "/bluebubbles-webhook"
 MAX_TEXT_LENGTH = 4000
+WEBHOOK_REPLAY_CACHE_MAX = 2048
+WEBHOOK_REPLAY_TTL_SECONDS = 10 * 60
 
 # Tapback reaction codes (BlueBubbles associatedMessageType values)
 _TAPBACK_ADDED = {
@@ -90,7 +95,39 @@ def _normalize_server_url(raw: str) -> str:
     return value.rstrip("/")
 
 
+def _normalize_webhook_path(raw: str) -> str:
+    value = (raw or DEFAULT_WEBHOOK_PATH).strip() or DEFAULT_WEBHOOK_PATH
+    if not value.startswith("/"):
+        value = f"/{value}"
+    return value.rstrip("/") or "/"
 
+
+def _normalize_webhook_public_url(raw: str, webhook_path: str) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    parts = urlsplit(value)
+    if not parts.scheme or not parts.netloc:
+        raise ValueError("BLUEBUBBLES_WEBHOOK_PUBLIC_URL must be an absolute URL")
+    path = parts.path.rstrip("/") or webhook_path
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
+def _is_loopback_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _append_path_segment(url: str, segment: str, *, encode: bool = True) -> str:
+    parts = urlsplit(url)
+    rendered = quote(segment, safe="") if encode else segment
+    path = f"{parts.path.rstrip('/')}/{rendered}"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -121,14 +158,23 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             extra.get("webhook_path")
             or os.getenv("BLUEBUBBLES_WEBHOOK_PATH", DEFAULT_WEBHOOK_PATH)
         )
-        if not str(self.webhook_path).startswith("/"):
-            self.webhook_path = f"/{self.webhook_path}"
+        self.webhook_path = _normalize_webhook_path(str(self.webhook_path))
+        self.webhook_secret = (
+            extra.get("webhook_secret")
+            or os.getenv("BLUEBUBBLES_WEBHOOK_SECRET", "")
+        )
+        self.webhook_public_url = _normalize_webhook_public_url(
+            extra.get("webhook_public_url")
+            or os.getenv("BLUEBUBBLES_WEBHOOK_PUBLIC_URL", ""),
+            self.webhook_path,
+        )
         self.send_read_receipts = bool(extra.get("send_read_receipts", True))
         self.client: Optional[httpx.AsyncClient] = None
         self._runner = None
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: Dict[str, str] = {}
+        self._recent_webhook_message_ids: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # API helpers
@@ -186,12 +232,25 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 self.client = None
             return False
 
+        security_error = self._webhook_registration_security_error()
+        if security_error:
+            logger.error(
+                "[bluebubbles] refusing webhook registration: %s", security_error
+            )
+            if self.client:
+                await self.client.aclose()
+                self.client = None
+            return False
+
         app = web.Application()
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
         app.router.add_post(self.webhook_path, self._handle_webhook)
-        # The webhook auth value is carried in the query string because the
-        # BlueBubbles webhook API cannot send custom headers. Do not let
-        # aiohttp access logs write that request target to agent.log.
+        app.router.add_post(
+            f"{self.webhook_path.rstrip('/')}/{{webhook_secret}}",
+            self._handle_webhook,
+        )
+        # Legacy loopback-only webhook auth can carry a query-string password.
+        # Keep access logs disabled so local request targets are not written.
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.webhook_host, self.webhook_port)
@@ -225,6 +284,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     @property
     def _webhook_url(self) -> str:
         """Compute the external webhook URL for BlueBubbles registration."""
+        if self.webhook_public_url:
+            return self.webhook_public_url
         host = self.webhook_host
         if host in {"0.0.0.0", "127.0.0.1", "localhost", "::"}:
             host = "localhost"
@@ -232,16 +293,20 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
     @property
     def _webhook_register_url(self) -> str:
-        """Webhook URL registered with BlueBubbles, including the password as
-        a query param so inbound webhook POSTs carry credentials.
+        """Webhook URL registered with BlueBubbles.
 
         BlueBubbles posts events to the exact URL registered via
-        ``/api/v1/webhook``. Its webhook registration API does not support
-        custom headers, so embedding the password in the URL is the only
-        way to authenticate inbound webhooks without disabling auth.
+        ``/api/v1/webhook`` and cannot add custom headers. Public callbacks use
+        a dedicated path secret so the BlueBubbles API password is never
+        registered in the webhook URL. Query-string password auth is retained
+        only for loopback legacy deployments.
         """
         base = self._webhook_url
+        if self.webhook_secret:
+            return _append_path_segment(base, self.webhook_secret)
         if self.password:
+            if not _is_loopback_url(base):
+                return base
             return f"{base}?password={quote(self.password, safe='')}"
         return base
 
@@ -249,9 +314,35 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     def _webhook_register_url_for_log(self) -> str:
         """Webhook registration URL safe for logs."""
         base = self._webhook_url
+        if self.webhook_secret:
+            return _append_path_segment(base, "***", encode=False)
         if self.password:
+            if not _is_loopback_url(base):
+                return base
             return f"{base}?password=***"
         return base
+
+    def _webhook_registration_security_error(self) -> Optional[str]:
+        """Return a startup-blocking error for unsafe callback registration."""
+        callback_url = self._webhook_url
+        parts = urlsplit(callback_url)
+        if parts.query or parts.fragment:
+            return "BlueBubbles webhook callback URL must not include query or fragment components"
+        if _is_loopback_url(callback_url):
+            return None
+        if parts.scheme.lower() != "https":
+            return "BlueBubbles webhook callback URL must use HTTPS for non-loopback hosts"
+        if not self.webhook_secret:
+            return (
+                "BLUEBUBBLES_WEBHOOK_SECRET is required for non-loopback "
+                "BlueBubbles webhook callbacks"
+            )
+        if self.password and hmac.compare_digest(self.webhook_secret, self.password):
+            return (
+                "BLUEBUBBLES_WEBHOOK_SECRET must be separate from "
+                "BLUEBUBBLES_PASSWORD"
+            )
+        return None
 
     async def _find_registered_webhooks(self, url: str) -> list:
         """Return list of BB webhook entries matching *url*."""
@@ -272,6 +363,13 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         to avoid duplicates (e.g. after a crash without clean shutdown).
         """
         if not self.client:
+            return False
+
+        security_error = self._webhook_registration_security_error()
+        if security_error:
+            logger.error(
+                "[bluebubbles] refusing webhook registration: %s", security_error
+            )
             return False
 
         webhook_url = self._webhook_register_url
@@ -345,6 +443,51 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 exc,
             )
         return removed
+
+    def _is_webhook_request_authorized(self, request) -> bool:
+        """Validate inbound webhook authentication in constant time."""
+        if self.webhook_secret:
+            supplied = ""
+            match_info = getattr(request, "match_info", None)
+            if match_info is not None:
+                supplied = match_info.get("webhook_secret", "") or ""
+            return bool(supplied) and hmac.compare_digest(
+                str(supplied), str(self.webhook_secret)
+            )
+
+        if not _is_loopback_url(self._webhook_url):
+            return False
+
+        token = request.query.get("password") or request.query.get("guid")
+        return bool(token) and hmac.compare_digest(str(token), str(self.password))
+
+    def _remember_webhook_message_id(
+        self, event_type: str, message_id: Optional[str]
+    ) -> bool:
+        """Return False when a recent webhook message id is an exact replay."""
+        if not message_id:
+            return True
+
+        now = time.monotonic()
+        stale_before = now - WEBHOOK_REPLAY_TTL_SECONDS
+        self._recent_webhook_message_ids = {
+            key: seen_at
+            for key, seen_at in self._recent_webhook_message_ids.items()
+            if seen_at >= stale_before
+        }
+
+        replay_key = f"{event_type}:{message_id}"
+        if replay_key in self._recent_webhook_message_ids:
+            return False
+
+        self._recent_webhook_message_ids[replay_key] = now
+        if len(self._recent_webhook_message_ids) > WEBHOOK_REPLAY_CACHE_MAX:
+            oldest = sorted(
+                self._recent_webhook_message_ids.items(), key=lambda item: item[1]
+            )
+            for key, _ in oldest[: len(oldest) - WEBHOOK_REPLAY_CACHE_MAX]:
+                self._recent_webhook_message_ids.pop(key, None)
+        return True
 
     # ------------------------------------------------------------------
     # Chat GUID resolution
@@ -781,14 +924,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     async def _handle_webhook(self, request):
         from aiohttp import web
 
-        token = (
-            request.query.get("password")
-            or request.query.get("guid")
-            or request.headers.get("x-password")
-            or request.headers.get("x-guid")
-            or request.headers.get("x-bluebubbles-guid")
-        )
-        if token != self.password:
+        if not self._is_webhook_request_authorized(request):
             return web.json_response({"error": "unauthorized"}, status=401)
         try:
             raw = await request.read()
@@ -830,6 +966,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             **_TAPBACK_ADDED,
             **_TAPBACK_REMOVED,
         }:
+            return web.Response(text="ok")
+
+        message_id = self._value(
+            record.get("guid"),
+            record.get("messageGuid"),
+            record.get("id"),
+            payload.get("messageGuid"),
+            payload.get("id"),
+        )
+        if not self._remember_webhook_message_id(event_type, message_id):
             return web.Response(text="ok")
 
         text = (
@@ -926,11 +1072,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             message_type=msg_type,
             source=source,
             raw_message=payload,
-            message_id=self._value(
-                record.get("guid"),
-                record.get("messageGuid"),
-                record.get("id"),
-            ),
+            message_id=message_id,
             reply_to_message_id=self._value(
                 record.get("threadOriginatorGuid"),
                 record.get("associatedMessageGuid"),

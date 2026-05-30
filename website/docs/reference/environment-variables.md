@@ -364,6 +364,9 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `BLUEBUBBLES_PASSWORD` | BlueBubbles server password |
 | `BLUEBUBBLES_WEBHOOK_HOST` | Webhook listener bind address (default: `127.0.0.1`) |
 | `BLUEBUBBLES_WEBHOOK_PORT` | Webhook listener port (default: `8645`) |
+| `BLUEBUBBLES_WEBHOOK_PATH` | Webhook listener path (default: `/bluebubbles-webhook`) |
+| `BLUEBUBBLES_WEBHOOK_SECRET` | Dedicated webhook secret required for non-loopback BlueBubbles callbacks |
+| `BLUEBUBBLES_WEBHOOK_PUBLIC_URL` | HTTPS public/tunnel URL registered with BlueBubbles for non-loopback callbacks |
 | `BLUEBUBBLES_HOME_CHANNEL` | Phone/email for cron/notification delivery |
 | `BLUEBUBBLES_ALLOWED_USERS` | Comma-separated authorized users |
 | `BLUEBUBBLES_ALLOW_ALL_USERS` | Allow all users (`true`/`false`) |

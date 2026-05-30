@@ -364,6 +364,9 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 | `BLUEBUBBLES_PASSWORD` | BlueBubbles 服务器密码 |
 | `BLUEBUBBLES_WEBHOOK_HOST` | webhook 监听绑定地址（默认：`127.0.0.1`） |
 | `BLUEBUBBLES_WEBHOOK_PORT` | webhook 监听端口（默认：`8645`） |
+| `BLUEBUBBLES_WEBHOOK_PATH` | webhook 监听路径（默认：`/bluebubbles-webhook`） |
+| `BLUEBUBBLES_WEBHOOK_SECRET` | 非回环 BlueBubbles 回调所需的专用 webhook 密钥 |
+| `BLUEBUBBLES_WEBHOOK_PUBLIC_URL` | 注册到 BlueBubbles 的 HTTPS 公网/隧道回调 URL |
 | `BLUEBUBBLES_HOME_CHANNEL` | cron/通知投递的手机/邮箱 |
 | `BLUEBUBBLES_ALLOWED_USERS` | 逗号分隔的授权用户 |
 | `BLUEBUBBLES_ALLOW_ALL_USERS` | 允许所有用户（`true`/`false`） |

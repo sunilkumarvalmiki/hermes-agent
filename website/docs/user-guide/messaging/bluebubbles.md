@@ -87,11 +87,15 @@ Hermes → BlueBubbles REST API → Messages.app → iMessage
 | `BLUEBUBBLES_WEBHOOK_HOST` | No | `127.0.0.1` | Webhook listener bind address |
 | `BLUEBUBBLES_WEBHOOK_PORT` | No | `8645` | Webhook listener port |
 | `BLUEBUBBLES_WEBHOOK_PATH` | No | `/bluebubbles-webhook` | Webhook URL path |
+| `BLUEBUBBLES_WEBHOOK_SECRET` | Required for non-loopback callbacks | — | Dedicated webhook secret, separate from `BLUEBUBBLES_PASSWORD` |
+| `BLUEBUBBLES_WEBHOOK_PUBLIC_URL` | Required for tunneled/public callbacks | — | HTTPS URL registered with BlueBubbles; Hermes appends the webhook secret as a path segment |
 | `BLUEBUBBLES_HOME_CHANNEL` | No | — | Phone/email for cron delivery |
 | `BLUEBUBBLES_ALLOWED_USERS` | No | — | Comma-separated authorized users |
 | `BLUEBUBBLES_ALLOW_ALL_USERS` | No | `false` | Allow all users |
 
 Auto-marking messages as read is controlled by the `send_read_receipts` key under `platforms.bluebubbles.extra` in `~/.hermes/config.yaml` (default: `true`). There is no corresponding environment variable.
+
+For anything beyond the default loopback listener, set `BLUEBUBBLES_WEBHOOK_PUBLIC_URL` to an HTTPS URL and set `BLUEBUBBLES_WEBHOOK_SECRET` to a random value that is not your BlueBubbles server password. Hermes refuses non-loopback HTTP webhook registration and no longer puts the BlueBubbles API password in public callback URLs.
 
 ## Features
 
