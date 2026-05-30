@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import run_tests_parallel
+
 
 # Both tests share the same handoff file: the leaker writes here, the
 # verifier reads here. We park it in $TMPDIR with a unique-per-run name
@@ -55,12 +57,86 @@ def _pid_alive(pid: int) -> bool:
         # test is skipped on Windows so the path is unreachable.
         raise RuntimeError("_pid_alive POSIX-only")
     try:
-        os.kill(pid, 0)
+        os.kill(pid, 0)  # windows-footgun: ok
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
     return True
+
+
+def test_slice_files_uses_file_weights_when_duration_cache_is_empty(tmp_path: Path) -> None:
+    """First CI runs should not put all large test files in one shard."""
+    files = [
+        tmp_path / "tests" / "test_heavy.py",
+        tmp_path / "tests" / "test_a.py",
+        tmp_path / "tests" / "test_b.py",
+        tmp_path / "tests" / "test_c.py",
+    ]
+    for file in files:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("def test_placeholder():\n    pass\n")
+
+    weights = {
+        files[0]: 100,
+        files[1]: 1,
+        files[2]: 1,
+        files[3]: 1,
+    }
+
+    first_slice = run_tests_parallel._slice_files(
+        files,
+        slice_index=1,
+        slice_count=2,
+        durations={},
+        repo_root=tmp_path,
+        fallback_weights=weights,
+    )
+    second_slice = run_tests_parallel._slice_files(
+        files,
+        slice_index=2,
+        slice_count=2,
+        durations={},
+        repo_root=tmp_path,
+        fallback_weights=weights,
+    )
+
+    assert first_slice == [files[0]]
+    assert second_slice == files[1:]
+
+
+def test_slice_files_prefers_duration_cache_over_file_weights(tmp_path: Path) -> None:
+    """Observed durations are better estimates than raw file-size weights."""
+    files = [
+        tmp_path / "tests" / "test_many_fast.py",
+        tmp_path / "tests" / "test_few_slow.py",
+        tmp_path / "tests" / "test_small.py",
+    ]
+    for file in files:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("def test_placeholder():\n    pass\n")
+
+    weights = {
+        files[0]: 100,
+        files[1]: 1,
+        files[2]: 1,
+    }
+    durations = {
+        run_tests_parallel._format_file(files[0], tmp_path): 1.0,
+        run_tests_parallel._format_file(files[1], tmp_path): 80.0,
+        run_tests_parallel._format_file(files[2], tmp_path): 1.0,
+    }
+
+    first_slice = run_tests_parallel._slice_files(
+        files,
+        slice_index=1,
+        slice_count=2,
+        durations=durations,
+        repo_root=tmp_path,
+        fallback_weights=weights,
+    )
+
+    assert first_slice == [files[1]]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only probe")

@@ -12,6 +12,15 @@ on:
   schedule:
     - cron: "30 3 * * 1"
   workflow_dispatch:
+    inputs:
+      scan_depth:
+        description: "CodeQL scan depth"
+        required: true
+        default: "fast"
+        type: choice
+        options:
+          - fast
+          - full
 
 permissions:
   actions: read
@@ -25,7 +34,7 @@ concurrency:
 jobs:
   analyze:
     name: analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.HERMES_CI_UBUNTU_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -37,7 +46,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Initialize CodeQL
+      - name: Initialize CodeQL (fast push scan)
+        if: ${{ !(github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.scan_depth == 'full')) }}
+        uses: github/codeql-action/init@dc73d59c2d7bd4f8194098a91219eeee6d8a1719 # v4
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+          config-file: ./.github/codeql/codeql-fast.yml
+
+      - name: Initialize CodeQL (full scheduled scan)
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.scan_depth == 'full') }}
         uses: github/codeql-action/init@dc73d59c2d7bd4f8194098a91219eeee6d8a1719 # v4
         with:
           languages: ${{ matrix.language }}

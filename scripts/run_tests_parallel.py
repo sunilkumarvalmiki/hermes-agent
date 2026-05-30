@@ -538,6 +538,7 @@ def _slice_files(
     slice_count: int,
     durations: dict[str, float],
     repo_root: Path,
+    fallback_weights: dict[Path, float] | None = None,
 ) -> List[Path]:
     """Return the subset of *files* belonging to slice *slice_index*.
 
@@ -546,10 +547,10 @@ def _slice_files(
     the slice with the smallest accumulated time so far. This minimizes
     the makespan (max slice duration) and keeps CI jobs balanced.
 
-    Files with no cached duration get a default estimate of 2.0s (roughly
-    the P50 from profiling). This means first-time ``--slice`` runs
-    (no cache) still get reasonable distribution, and new files don't
-    all land in one slice.
+    Files with no cached duration fall back to cheap file-size weights when
+    available, then to a default estimate of 2.0s (roughly the P50 from
+    profiling). This keeps first-time CI runs balanced without collecting
+    the whole repository before slicing.
 
     ``slice_index`` is 1-indexed (1..slice_count) for ergonomics —
     ``--slice 1/4`` reads more naturally than ``--slice 0/4``.
@@ -563,12 +564,16 @@ def _slice_files(
         )
         sys.exit(2)
 
-    # Build (file, estimated_duration) pairs.
+    # Build (file, estimated_duration) pairs. Real duration cache entries
+    # win; file-size weights are only a first-run fallback.
     default_dur = 2.0
     file_durs: List[Tuple[Path, float]] = []
     for f in files:
         rel = _format_file(f, repo_root)
-        dur = durations.get(rel, default_dur)
+        dur = durations.get(rel)
+        if dur is None:
+            weight = (fallback_weights or {}).get(f)
+            dur = float(max(1.0, weight)) if weight else default_dur
         file_durs.append((f, dur))
 
     # Sort longest first (LPT).
@@ -701,18 +706,33 @@ def main() -> int:
         print(f"No test files discovered under {[str(r) for r in roots]}", file=sys.stderr)
         return 1
 
-    # Count individual tests per file via a single pytest --co pass.
-    test_counts = _count_tests(files, repo_root, pytest_passthrough)
-    total_tests = sum(test_counts.values())
-
     # Apply slicing if requested — distribute files across CI jobs by
-    # estimated duration so no one job gets all the slow files.
+    # estimated duration so no one job gets all the slow files. This must
+    # happen before pytest collection so each shard only collects its own files.
     if slice_index is not None:
         durations = _load_durations(repo_root)
-        files = _slice_files(files, slice_index, slice_count, durations, repo_root)
-        # Recount after slicing.
-        test_counts = {f: test_counts[f] for f in files if f in test_counts}
-        total_tests = sum(test_counts.values())
+        fallback_weights: dict[Path, float] | None = None
+        if not durations:
+            fallback_weights = {}
+            for file in files:
+                try:
+                    fallback_weights[file] = max(1.0, file.stat().st_size / 4096.0)
+                except OSError:
+                    fallback_weights[file] = 1.0
+        files = _slice_files(
+            files,
+            slice_index,
+            slice_count,
+            durations,
+            repo_root,
+            fallback_weights=fallback_weights,
+        )
+
+    # Count individual tests per file via a single pytest --co pass after
+    # slicing; collecting every repo test in every matrix shard costs real CI
+    # wall time and does not improve sharding once files are selected.
+    test_counts = _count_tests(files, repo_root, pytest_passthrough)
+    total_tests = sum(test_counts.values())
 
     print(
         f"Discovered {len(files)} test files ({total_tests} tests) under "

@@ -1,0 +1,14 @@
+name: "Hermes fast CodeQL"
+
+# Push-time scans prioritize production/runtime code. The weekly scheduled
+# scan in codeql-personal.yml still runs the full repository and heavier query
+# set, including tests and docs.
+paths-ignore:
+  - "tests/**"
+  - "docs/**"
+  - "website/**"
+  - "infographic/**"
+  - "**/*.md"
+  - "**/*.rst"
+  - "**/*.txt"
+  - "**/node_modules/**"
