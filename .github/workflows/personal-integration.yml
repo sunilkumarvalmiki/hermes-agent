@@ -115,6 +115,9 @@ jobs:
       - name: Type-check TUI
         run: npm run type-check --prefix ui-tui
 
+      - name: Build TUI
+        run: npm run build --prefix ui-tui
+
       - name: Test TUI
         run: npm test --prefix ui-tui
 
