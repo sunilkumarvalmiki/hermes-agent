@@ -12,7 +12,7 @@ if [ -x "$HOME/.local/bin/uv" ] && command -v sudo >/dev/null 2>&1; then
   sudo ln -sf "$HOME/.local/bin/uv" /usr/local/bin/uv
 fi
 uv python install 3.11
-uv venv .venv --python 3.11
+uv venv .venv --python 3.11 --allow-existing
 
 if UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --extra all --locked; then
   echo "Installed Python dependencies from uv.lock."
