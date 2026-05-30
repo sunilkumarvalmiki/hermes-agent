@@ -8,6 +8,9 @@ export UV_NO_CONFIG=1
 export HERMES_HOME="${HERMES_HOME:-/workspaces/.hermes-personal-stable}"
 
 python -m pip install --user "uv==0.11.17"
+if [ -x "$HOME/.local/bin/uv" ] && command -v sudo >/dev/null 2>&1; then
+  sudo ln -sf "$HOME/.local/bin/uv" /usr/local/bin/uv
+fi
 uv python install 3.11
 uv venv .venv --python 3.11
 
