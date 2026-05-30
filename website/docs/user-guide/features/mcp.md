@@ -129,6 +129,10 @@ the hermes-agent repo, so Nous has reviewed each entry before it shipped —
 `source:` field's repository, the `install.bootstrap:` commands, and any
 `transport.command:` invocation.
 
+Catalog entries that run `install.bootstrap` commands must pin `install.ref`
+to a full 40-character commit SHA. Hermes rejects branch or tag refs for those
+entries so a reviewed manifest cannot later float to different bootstrap code.
+
 Manifests live at
 [`optional-mcps/<name>/manifest.yaml`](https://github.com/NousResearch/hermes-agent/tree/main/optional-mcps)
 on GitHub. The picker also prints the manifest's `source:` URL at install

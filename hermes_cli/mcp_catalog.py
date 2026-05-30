@@ -43,6 +43,12 @@ from hermes_cli.config import (
 from hermes_cli.cli_output import prompt as _prompt_input
 
 _MANIFEST_VERSION = 1
+_FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_GIT_SHA_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
+def _is_full_commit_sha_ref(ref: str) -> bool:
+    return bool(_FULL_COMMIT_SHA_RE.fullmatch(ref))
 
 # Substituted at install time inside `transport.command` / `transport.args`.
 _INSTALL_DIR_VAR = "${INSTALL_DIR}"
@@ -87,7 +93,7 @@ class InstallSpec:
     """
     type: str  # "git"
     url: str
-    ref: str  # commit/tag/branch — pinned, never floats
+    ref: str  # full commit SHA when bootstrap commands are present
     bootstrap: List[str] = field(default_factory=list)
 
 
@@ -235,18 +241,24 @@ def _parse_manifest(path: Path) -> CatalogEntry:
         i_type = install_raw.get("type")
         if i_type != "git":
             raise CatalogError(f"{path}: install.type must be 'git' (got {i_type!r})")
-        url = install_raw.get("url") or ""
-        ref = install_raw.get("ref") or ""
+        url = str(install_raw.get("url") or "")
+        ref = str(install_raw.get("ref") or "")
         if not url or not ref:
             raise CatalogError(f"{path}: install.url and install.ref are required")
         bootstrap = install_raw.get("bootstrap") or []
         if not isinstance(bootstrap, list):
             raise CatalogError(f"{path}: install.bootstrap must be a list")
+        bootstrap_commands = [str(c) for c in bootstrap]
+        if bootstrap_commands and not _is_full_commit_sha_ref(ref):
+            raise CatalogError(
+                f"{path}: install.ref must be a full immutable commit SHA "
+                "when install.bootstrap is present"
+            )
         install = InstallSpec(
             type=i_type,
             url=url,
             ref=ref,
-            bootstrap=[str(c) for c in bootstrap],
+            bootstrap=bootstrap_commands,
         )
 
     return CatalogEntry(
@@ -394,7 +406,7 @@ def _do_git_install(entry: CatalogEntry) -> Path:
     # Detecting SHA-shaped refs upfront avoids a guaranteed stderr leak on
     # the fast path (the --branch attempt would always fail noisily for a
     # SHA ref before we fall back to full-clone-then-checkout).
-    is_sha_ref = bool(re.fullmatch(r"[0-9a-f]{7,40}", install.ref))
+    is_sha_ref = bool(_GIT_SHA_RE.fullmatch(install.ref))
 
     if not is_sha_ref:
         proc = subprocess.run(

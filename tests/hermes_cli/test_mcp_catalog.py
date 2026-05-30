@@ -148,7 +148,7 @@ class TestManifestParsing:
             install={
                 "type": "git",
                 "url": "https://example.com/demo.git",
-                "ref": "v1.0.0",
+                "ref": "abc1234567890abcdef1234567890abcdef12345",
                 "bootstrap": ["pip install -r requirements.txt"],
             },
             transport={
@@ -163,8 +163,28 @@ class TestManifestParsing:
         e = list_catalog()[0]
         assert e.install is not None
         assert e.install.url == "https://example.com/demo.git"
-        assert e.install.ref == "v1.0.0"
+        assert e.install.ref == "abc1234567890abcdef1234567890abcdef12345"
         assert e.install.bootstrap == ["pip install -r requirements.txt"]
+
+    def test_bootstrap_requires_full_commit_sha_ref(self, catalog_dir):
+        body = _basic_manifest(
+            install={
+                "type": "git",
+                "url": "https://example.com/demo.git",
+                "ref": "main",
+                "bootstrap": ["pip install -r requirements.txt"],
+            },
+            transport={
+                "type": "stdio",
+                "command": "${INSTALL_DIR}/.venv/bin/python",
+                "args": ["${INSTALL_DIR}/server.py"],
+            },
+        )
+        manifest = _write_manifest(catalog_dir, "demo", body)
+        from hermes_cli.mcp_catalog import CatalogError, _parse_manifest
+
+        with pytest.raises(CatalogError, match="full immutable commit SHA"):
+            _parse_manifest(manifest)
 
     def test_invalid_manifest_skipped(self, catalog_dir):
         # Broken: wrong manifest_version
@@ -791,3 +811,19 @@ class TestShippedCatalog:
             assert entry.name
             assert entry.description
             assert entry.transport.type in ("stdio", "http")
+
+    def test_shipped_bootstrap_installs_use_full_commit_sha(self, monkeypatch):
+        """First-party bootstrap manifests must not float to branch/tag refs."""
+        monkeypatch.delenv("HERMES_OPTIONAL_MCPS", raising=False)
+        from hermes_cli.mcp_catalog import _catalog_root, _parse_manifest
+
+        root = _catalog_root()
+        if not root.exists():
+            pytest.skip("optional-mcps/ not present in this checkout")
+
+        manifests = list(root.glob("*/manifest.yaml"))
+        for m in manifests:
+            entry = _parse_manifest(m)
+            if entry.install is not None and entry.install.bootstrap:
+                ref = entry.install.ref
+                assert len(ref) == 40 and all(c in "0123456789abcdef" for c in ref)
