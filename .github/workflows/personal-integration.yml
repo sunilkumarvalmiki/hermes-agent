@@ -118,6 +118,9 @@ jobs:
       - name: Build TUI
         run: npm run build --prefix ui-tui
 
+      - name: Build hermes-ink package entry
+        run: npm run build --prefix ui-tui/packages/hermes-ink
+
       - name: Test TUI
         run: npm test --prefix ui-tui
 
