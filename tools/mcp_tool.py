@@ -600,7 +600,13 @@ def _resolve_client_cert(server_name: str, config: dict):
                 f"MCP server '{server_name}': {label} must be a non-empty "
                 f"string path (got {type(path).__name__})"
             )
-        expanded = os.path.expanduser(path.strip())
+        raw_path = path.strip()
+        home = os.environ.get("HOME")
+        if home and (raw_path == "~" or raw_path.startswith(("~/", "~\\"))):
+            tail = raw_path[1:].lstrip("/\\")
+            expanded = os.path.join(home, tail) if tail else home
+        else:
+            expanded = os.path.expanduser(raw_path)
         if not os.path.isfile(expanded):
             raise FileNotFoundError(
                 f"MCP server '{server_name}': {label} not found at "
@@ -1448,6 +1454,30 @@ class MCPServerTask:
         ssl_verify = config.get("ssl_verify", True)
         client_cert = _resolve_client_cert(self.name, config)
 
+        def _build_non_redirecting_httpx_client_factory():
+            import httpx as _httpx_mod
+
+            def _mcp_http_client_factory(
+                headers=None, timeout=None, auth=None,
+            ):
+                kwargs: dict = {
+                    "follow_redirects": False,
+                    "verify": ssl_verify,
+                }
+                if timeout is not None:
+                    kwargs["timeout"] = timeout
+                else:
+                    kwargs["timeout"] = _httpx_mod.Timeout(30.0, read=300.0)
+                if headers is not None:
+                    kwargs["headers"] = headers
+                if auth is not None:
+                    kwargs["auth"] = auth
+                if client_cert is not None:
+                    kwargs["cert"] = client_cert
+                return _httpx_mod.AsyncClient(**kwargs)
+
+            return _mcp_http_client_factory
+
         # OAuth 2.1 PKCE: route through the central MCPOAuthManager so the
         # same provider instance is reused across reconnects, pre-flow
         # disk-watch is active, and config-time CLI code paths share state.
@@ -1498,37 +1528,11 @@ class MCPServerTask:
                 # behind OAuth 2.1 PKCE work. Previously built but never
                 # forwarded — SSE OAuth would silently fail with 401s.
                 _sse_kwargs["auth"] = _oauth_auth
-            if client_cert is not None or ssl_verify is not True:
-                # SSE transport doesn't expose verify/cert as kwargs, so route
-                # them through an httpx_client_factory that wraps the SDK's
-                # defaults (follow_redirects=True) and adds our TLS settings.
-                # The SDK calls the factory with (headers, auth, timeout); we
-                # forward all of those and layer verify/cert on top.
-                import httpx as _httpx_mod
-
-                _cert_for_factory = client_cert
-                _verify_for_factory = ssl_verify
-
-                def _mcp_http_client_factory(
-                    headers=None, timeout=None, auth=None,
-                ):
-                    kwargs: dict = {
-                        "follow_redirects": True,
-                        "verify": _verify_for_factory,
-                    }
-                    if timeout is not None:
-                        kwargs["timeout"] = timeout
-                    else:
-                        kwargs["timeout"] = _httpx_mod.Timeout(30.0, read=300.0)
-                    if headers is not None:
-                        kwargs["headers"] = headers
-                    if auth is not None:
-                        kwargs["auth"] = auth
-                    if _cert_for_factory is not None:
-                        kwargs["cert"] = _cert_for_factory
-                    return _httpx_mod.AsyncClient(**kwargs)
-
-                _sse_kwargs["httpx_client_factory"] = _mcp_http_client_factory
+            # Route SSE through an explicit httpx factory so authenticated
+            # headers are never replayed to redirect targets.
+            _sse_kwargs["httpx_client_factory"] = (
+                _build_non_redirecting_httpx_client_factory()
+            )
             async with sse_client(**_sse_kwargs) as (read_stream, write_stream):
                 async with ClientSession(
                     read_stream, write_stream, **sampling_kwargs
@@ -1550,23 +1554,10 @@ class MCPServerTask:
             # matching the SDK's own create_mcp_http_client defaults.
             import httpx
 
-            _original_url = httpx.URL(url)
-
-            async def _strip_auth_on_cross_origin_redirect(response):
-                """Strip Authorization headers when redirected to a different origin."""
-                if response.is_redirect and response.next_request:
-                    target = response.next_request.url
-                    if (target.scheme, target.host, target.port) != (
-                        _original_url.scheme, _original_url.host, _original_url.port,
-                    ):
-                        response.next_request.headers.pop("authorization", None)
-                        response.next_request.headers.pop("Authorization", None)
-
             client_kwargs: dict = {
-                "follow_redirects": True,
+                "follow_redirects": False,
                 "timeout": httpx.Timeout(float(connect_timeout), read=300.0),
                 "verify": ssl_verify,
-                "event_hooks": {"response": [_strip_auth_on_cross_origin_redirect]},
             }
             if headers:
                 client_kwargs["headers"] = headers
@@ -1598,6 +1589,7 @@ class MCPServerTask:
                 "headers": headers,
                 "timeout": float(connect_timeout),
                 "verify": ssl_verify,
+                "httpx_client_factory": _build_non_redirecting_httpx_client_factory(),
             }
             if _oauth_auth is not None:
                 _http_kwargs["auth"] = _oauth_auth

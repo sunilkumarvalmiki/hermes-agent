@@ -398,9 +398,9 @@ def patch_sse_client():
 
 
 class TestSSEClientCert:
-    def test_no_factory_when_defaults(self, patch_sse_client):
-        """With no cert and ssl_verify=True (default), the SDK's own factory is
-        used — we don't inject one."""
+    def test_factory_injected_when_defaults(self, patch_sse_client):
+        """Even with default TLS settings, SSE uses our factory so redirects
+        cannot replay configured headers to another origin."""
         from tools.mcp_tool import MCPServerTask
 
         server = MCPServerTask("sse-test")
@@ -423,11 +423,27 @@ class TestSSEClientCert:
                     pass
 
         asyncio.run(drive())
-        assert "httpx_client_factory" not in patch_sse_client
+        factory = patch_sse_client.get("httpx_client_factory")
+        assert factory is not None, "expected non-redirecting factory"
+
+        captured_client_kwargs: dict = {}
+
+        class DummyAsyncClient:
+            def __init__(self, **kwargs):
+                captured_client_kwargs.update(kwargs)
+
+        import httpx
+        with patch.object(httpx, "AsyncClient", DummyAsyncClient):
+            factory(headers={"x": "y"}, timeout=httpx.Timeout(30.0), auth=None)
+
+        assert captured_client_kwargs["verify"] is True
+        assert captured_client_kwargs["follow_redirects"] is False
+        assert captured_client_kwargs["headers"] == {"x": "y"}
+        assert "cert" not in captured_client_kwargs
 
     def test_factory_injected_when_cert_set(self, patch_sse_client, tmp_path):
         """With client_cert set, an httpx_client_factory is injected that
-        applies the cert (and follow_redirects=True to match the SDK)."""
+        applies the cert while keeping redirects disabled."""
         from tools.mcp_tool import MCPServerTask
 
         cert = tmp_path / "client.pem"
@@ -472,7 +488,7 @@ class TestSSEClientCert:
 
         assert captured_client_kwargs["cert"] == str(cert)
         assert captured_client_kwargs["verify"] is True
-        assert captured_client_kwargs["follow_redirects"] is True
+        assert captured_client_kwargs["follow_redirects"] is False
         assert captured_client_kwargs["headers"] == {"x": "y"}
 
     def test_factory_forwards_custom_ca_bundle(self, patch_sse_client, tmp_path):
