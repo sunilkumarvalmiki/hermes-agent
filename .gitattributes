@@ -1,2 +1,6 @@
 # Auto-generated files — collapse diffs and exclude from language stats
 web/package-lock.json linguist-generated=true
+
+# Personal fork infrastructure should keep Unix line endings in Codespaces.
+.devcontainer/*.sh text eol=lf
+.github/workflows/*.yml text eol=lf
