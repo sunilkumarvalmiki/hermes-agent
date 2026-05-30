@@ -1540,6 +1540,26 @@ class AccessPolicy:
     def group_policy(self) -> str:
         return self._group_policy
 
+    def authorizes_source(self, source) -> bool:
+        """Return True only for explicit Yuanbao adapter-side allowlist matches."""
+        chat_type = str(getattr(source, "chat_type", "") or "").strip().lower()
+        chat_id = str(getattr(source, "chat_id", "") or "").strip()
+        sender_id = str(getattr(source, "user_id", "") or "").strip()
+
+        if chat_type == "dm":
+            return bool(
+                sender_id
+                and self._dm_policy == "allowlist"
+                and sender_id in self._dm_allow_from
+            )
+        if chat_type in {"group", "forum", "channel"}:
+            return bool(
+                chat_id
+                and self._group_policy == "allowlist"
+                and chat_id in self._group_allow_from
+            )
+        return False
+
 
 class AccessGuardMiddleware(InboundMiddleware):
     """Platform-level DM/Group access control filter."""
@@ -4695,6 +4715,9 @@ class YuanbaoAdapter(BasePlatformAdapter):
     def enforces_own_access_policy(self) -> bool:
         """Yuanbao gates DM/group access at intake via dm_policy/group_policy."""
         return True
+
+    def authorizes_source_via_own_access_policy(self, source) -> bool:
+        return bool(self._access_policy.authorizes_source(source))
 
     async def connect(self) -> bool:
         """Connect to Yuanbao WS gateway and authenticate.

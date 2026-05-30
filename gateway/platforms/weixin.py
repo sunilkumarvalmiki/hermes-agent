@@ -1402,6 +1402,26 @@ class WeixinAdapter(BasePlatformAdapter):
         """Weixin gates DM/group access at intake via dm_policy/group_policy."""
         return True
 
+    def authorizes_source_via_own_access_policy(self, source) -> bool:
+        """Return True only for explicit Weixin adapter-side allowlist matches."""
+        chat_type = str(getattr(source, "chat_type", "") or "").strip().lower()
+        chat_id = str(getattr(source, "chat_id", "") or "").strip()
+        sender_id = str(getattr(source, "user_id", "") or "").strip()
+
+        if chat_type == "dm":
+            return bool(
+                sender_id
+                and self._dm_policy == "allowlist"
+                and sender_id in self._allow_from
+            )
+        if chat_type in {"group", "forum", "channel"}:
+            return bool(
+                chat_id
+                and self._group_policy == "allowlist"
+                and chat_id in self._group_allow_from
+            )
+        return False
+
     def _is_dm_allowed(self, sender_id: str) -> bool:
         if self._dm_policy == "disabled":
             return False

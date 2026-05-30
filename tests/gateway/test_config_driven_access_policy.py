@@ -1,22 +1,13 @@
 """Tests for config-driven platform access policies at the gateway layer.
 
-Background (#34515): WeCom, Weixin, Yuanbao, and QQBot expose a documented
-config-driven access surface (``dm_policy`` / ``group_policy`` / ``allow_from``
-/ ``group_allow_from`` in ``PlatformConfig.extra``) and enforce it at intake —
-a message is dropped inside the adapter and never reaches the gateway unless it
-already passed that policy.
+WeCom, Weixin, Yuanbao, and QQBot expose adapter-side policy knobs such as
+``dm_policy`` / ``group_policy`` / ``allow_from`` / ``group_allow_from``. Those
+knobs run before the shared gateway authorization check.
 
-The gateway's env-based allowlist check (``_is_user_authorized``) runs *after*
-the adapter. Before the fix it fell through to an env-only default-deny when no
-``PLATFORM_ALLOWED_USERS`` env var was set, silently rejecting ``dm_policy:
-open`` and config-only allowlists even though the adapter had already
-authorized the sender.
-
-The fix is a single drift-proof contract: adapters that own their access policy
-declare ``enforces_own_access_policy`` (a ``BasePlatformAdapter`` property,
-default ``False``). The gateway trusts that flag and skips the env-only
-default-deny for those platforms, rather than re-implementing each adapter's
-policy logic a second time.
+The gateway must not treat the mere presence of an adapter-owned policy surface
+as authorization. Open policy is still unauthenticated network input. Only an
+explicit allowlist match from the adapter-side policy may satisfy the gateway's
+default-deny requirement when no env allowlist is configured.
 """
 
 from types import SimpleNamespace
@@ -55,7 +46,13 @@ def _clear_auth_env(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
-def _make_runner(platform: Platform, config: GatewayConfig, *, enforces: bool):
+def _make_runner(
+    platform: Platform,
+    config: GatewayConfig,
+    *,
+    enforces: bool,
+    authorizes=None,
+):
     """Build a bare GatewayRunner with one adapter for *platform*.
 
     ``enforces`` controls whether the adapter declares
@@ -66,6 +63,8 @@ def _make_runner(platform: Platform, config: GatewayConfig, *, enforces: bool):
     runner = object.__new__(GatewayRunner)
     runner.config = config
     adapter = SimpleNamespace(send=AsyncMock(), enforces_own_access_policy=enforces)
+    if authorizes is not None:
+        adapter.authorizes_source_via_own_access_policy = authorizes
     runner.adapters = {platform: adapter}
     runner.pairing_store = MagicMock()
     runner.pairing_store.is_approved.return_value = False
@@ -93,7 +92,12 @@ def test_base_adapter_defaults_to_not_owning_access_policy():
     from gateway.platforms.base import BasePlatformAdapter
 
     # The default lives on the base property descriptor.
-    assert BasePlatformAdapter.enforces_own_access_policy.fget(object()) is False
+    adapter = object()
+    assert BasePlatformAdapter.enforces_own_access_policy.fget(adapter) is False
+    assert BasePlatformAdapter.authorizes_source_via_own_access_policy(
+        adapter,
+        _source(Platform.TELEGRAM),
+    ) is False
 
 
 @pytest.mark.parametrize(
@@ -118,36 +122,152 @@ def test_own_policy_adapters_declare_the_flag(module_path, class_name):
 
 
 # ---------------------------------------------------------------------------
-# Layer 2: gateway trusts the adapter-enforced flag
+# Layer 2: gateway requires an explicit adapter-side allowlist decision
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("platform", _OWN_POLICY_PLATFORMS)
-def test_own_policy_platform_authorized_without_env_allowlist(monkeypatch, platform):
-    """A message reaching the gateway from an own-policy adapter is trusted.
-
-    With no env allowlist set, the gateway must NOT default-deny — the adapter
-    already authorized the sender at intake (e.g. ``dm_policy: open``).
-    """
+def test_open_own_policy_platform_default_denies_without_env_allowlist(monkeypatch, platform):
+    """Open adapter policy is not authorization for network input."""
     _clear_auth_env(monkeypatch)
     config = GatewayConfig(
         platforms={platform: PlatformConfig(enabled=True, extra={"dm_policy": "open"})}
     )
     runner, _adapter = _make_runner(platform, config, enforces=True)
 
-    assert runner._is_user_authorized(_source(platform)) is True
+    assert runner._is_user_authorized(_source(platform)) is False
 
 
 @pytest.mark.parametrize("platform", _OWN_POLICY_PLATFORMS)
-def test_own_policy_platform_authorized_for_group_chat(monkeypatch, platform):
-    """Group traffic from an own-policy adapter is trusted the same way."""
+def test_open_own_policy_group_default_denies_without_env_allowlist(monkeypatch, platform):
+    """Open group policy must not bypass the shared default-deny gate."""
     _clear_auth_env(monkeypatch)
     config = GatewayConfig(
         platforms={platform: PlatformConfig(enabled=True, extra={"group_policy": "open"})}
     )
     runner, _adapter = _make_runner(platform, config, enforces=True)
 
-    assert runner._is_user_authorized(_source(platform, chat_type="group")) is True
+    assert runner._is_user_authorized(_source(platform, chat_type="group")) is False
+
+
+def test_adapter_explicit_policy_authorizes_matching_source(monkeypatch):
+    """The gateway accepts a positive adapter-side allowlist decision."""
+    _clear_auth_env(monkeypatch)
+    config = GatewayConfig(
+        platforms={Platform.WECOM: PlatformConfig(enabled=True, extra={"dm_policy": "allowlist"})}
+    )
+    runner, _adapter = _make_runner(
+        Platform.WECOM,
+        config,
+        enforces=True,
+        authorizes=lambda source: source.user_id == "some-user",
+    )
+
+    assert runner._is_user_authorized(_source(Platform.WECOM)) is True
+
+
+def test_adapter_empty_policy_decision_default_denies(monkeypatch):
+    """An empty adapter-side allowlist is a denial, not an open fallback."""
+    _clear_auth_env(monkeypatch)
+    config = GatewayConfig(
+        platforms={Platform.WECOM: PlatformConfig(enabled=True, extra={"dm_policy": "allowlist"})}
+    )
+    runner, _adapter = _make_runner(
+        Platform.WECOM,
+        config,
+        enforces=True,
+        authorizes=lambda _source: False,
+    )
+
+    assert runner._is_user_authorized(_source(Platform.WECOM)) is False
+
+
+@pytest.mark.parametrize(
+    "module_path, class_name, platform, attrs",
+    [
+        (
+            "gateway.platforms.wecom",
+            "WeComAdapter",
+            Platform.WECOM,
+            {
+                "_dm_policy": "allowlist",
+                "_allow_from": ["some-user"],
+                "_group_policy": "allowlist",
+                "_group_allow_from": ["some-chat"],
+                "_groups": {},
+            },
+        ),
+        (
+            "gateway.platforms.weixin",
+            "WeixinAdapter",
+            Platform.WEIXIN,
+            {
+                "_dm_policy": "allowlist",
+                "_allow_from": ["some-user"],
+                "_group_policy": "allowlist",
+                "_group_allow_from": ["some-chat"],
+            },
+        ),
+        (
+            "gateway.platforms.qqbot.adapter",
+            "QQAdapter",
+            Platform.QQBOT,
+            {
+                "_dm_policy": "allowlist",
+                "_allow_from": ["some-user"],
+                "_group_policy": "allowlist",
+                "_group_allow_from": ["some-chat"],
+            },
+        ),
+    ],
+)
+def test_own_policy_adapters_authorize_only_explicit_allowlist_matches(
+    module_path,
+    class_name,
+    platform,
+    attrs,
+):
+    """Adapter-side auth hooks distinguish explicit allowlists from open mode."""
+    import importlib
+
+    module = importlib.import_module(module_path)
+    adapter_cls = getattr(module, class_name)
+    adapter = object.__new__(adapter_cls)
+    for name, value in attrs.items():
+        setattr(adapter, name, value)
+
+    assert adapter.authorizes_source_via_own_access_policy(_source(platform)) is True
+    assert adapter.authorizes_source_via_own_access_policy(
+        SessionSource(platform=platform, user_id="other", chat_id="some-chat", chat_type="dm")
+    ) is False
+
+    setattr(adapter, "_dm_policy", "open")
+    assert adapter.authorizes_source_via_own_access_policy(_source(platform)) is False
+
+
+def test_yuanbao_policy_authorizes_only_explicit_allowlist_matches():
+    from gateway.platforms.yuanbao import AccessPolicy, YuanbaoAdapter
+
+    adapter = object.__new__(YuanbaoAdapter)
+    adapter._access_policy = AccessPolicy(
+        dm_policy="allowlist",
+        dm_allow_from=["some-user"],
+        group_policy="allowlist",
+        group_allow_from=["some-chat"],
+    )
+
+    assert adapter.authorizes_source_via_own_access_policy(_source(Platform.YUANBAO)) is True
+    assert adapter.authorizes_source_via_own_access_policy(
+        SessionSource(platform=Platform.YUANBAO, user_id="other", chat_id="some-chat", chat_type="dm")
+    ) is False
+
+    adapter._access_policy = AccessPolicy(
+        dm_policy="open",
+        dm_allow_from=[],
+        group_policy="open",
+        group_allow_from=[],
+    )
+    assert adapter.authorizes_source_via_own_access_policy(_source(Platform.YUANBAO)) is False
 
 
 def test_non_owning_platform_still_default_denies(monkeypatch):

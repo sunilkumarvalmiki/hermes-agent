@@ -1734,16 +1734,26 @@ class BasePlatformAdapter(ABC):
         enforce it at intake: a message is dropped inside the adapter and never
         reaches the gateway unless it already passed that policy.
 
-        The gateway's env-based allowlist check runs *after* the adapter, so for
-        these platforms a message arriving at ``_is_user_authorized`` has, by
-        definition, already been authorized by the adapter. Without this flag the
-        gateway would then deny it again (no env allowlist → default deny),
-        silently breaking ``dm_policy: open`` and config-only allowlists.
+        The gateway's env-based allowlist check runs *after* the adapter, so
+        these platforms also expose
+        ``authorizes_source_via_own_access_policy`` for the source-specific
+        allowlist decision. This capability flag alone is not authorization:
+        ``dm_policy: open`` and ``group_policy: open`` must still fall through
+        to the shared default-deny gate.
 
         Adapters that own their access policy override this to return ``True``.
-        The gateway treats that as "already authorized at intake" and skips the
-        env-allowlist default-deny. Adapters that delegate access control to the
-        gateway leave it ``False`` (the default).
+        Adapters that delegate access control to the gateway leave it ``False``
+        (the default).
+        """
+        return False
+
+    def authorizes_source_via_own_access_policy(self, source: SessionSource) -> bool:
+        """Return whether adapter-side policy explicitly authorizes ``source``.
+
+        ``enforces_own_access_policy`` is only a capability marker. Network
+        input still needs a positive, source-specific authorization decision.
+        Adapters that expose config-driven allowlists override this method and
+        return True only for explicit allowlist or equivalent trust bindings.
         """
         return False
 

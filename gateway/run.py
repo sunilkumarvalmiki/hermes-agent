@@ -6549,10 +6549,12 @@ class GatewayRunner:
         Mirrors ``BasePlatformAdapter.enforces_own_access_policy``. Adapters
         such as WeCom, Weixin, Yuanbao, and QQBot evaluate their documented
         ``dm_policy`` / ``group_policy`` / ``allow_from`` config before a
-        message is dispatched to the gateway, so a message that reaches
-        ``_is_user_authorized`` has already been authorized by the adapter.
-        Defaults to ``False`` when the adapter is unknown or doesn't expose
-        the flag.
+        message is dispatched to the gateway. This is only a capability
+        marker; actual authorization is source-specific and is checked by
+        ``_adapter_authorizes_source_via_own_access_policy``.
+
+        Defaults to ``False`` when the adapter is unknown or doesn't expose the
+        flag.
         """
         if not platform:
             return False
@@ -6566,6 +6568,30 @@ class GatewayRunner:
         if adapter is None:
             return False
         return bool(getattr(adapter, "enforces_own_access_policy", False))
+
+    def _adapter_authorizes_source_via_own_access_policy(self, source: SessionSource) -> bool:
+        """Ask an adapter for a source-specific policy authorization decision."""
+        platform = source.platform if source else None
+        if not platform:
+            return False
+        adapters = getattr(self, "adapters", None)
+        if not adapters:
+            return False
+        adapter = adapters.get(platform)
+        if adapter is None:
+            return False
+        authorizes = getattr(adapter, "authorizes_source_via_own_access_policy", None)
+        if not callable(authorizes):
+            return False
+        try:
+            return bool(authorizes(source))
+        except Exception:
+            logger.warning(
+                "Adapter-side access policy check failed for %s",
+                platform.value if platform else "unknown",
+                exc_info=True,
+            )
+            return False
 
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
@@ -6706,14 +6732,13 @@ class GatewayRunner:
         global_allowlist = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
 
         if not platform_allowlist and not group_user_allowlist and not group_chat_allowlist and not global_allowlist:
-            # No env allowlists configured. Adapters that own their own
-            # config-driven access policy (dm_policy / group_policy /
-            # allow_from / group_allow_from) already gated this message at
-            # intake — it would not have reached the gateway otherwise — so
-            # honor that decision instead of falling through to the
-            # env-only default-deny below, which would silently break
-            # `dm_policy: open` and config-only allowlists. (#34515)
-            if self._adapter_enforces_own_access_policy(source.platform):
+            # No env allowlists configured. Adapter-owned policy can satisfy
+            # the shared default-deny gate only with an explicit allowlist (or
+            # equivalent source-specific trust binding). A blanket
+            # ``enforces_own_access_policy`` capability is not authorization:
+            # ``dm_policy: open`` / ``group_policy: open`` is still
+            # unauthenticated network input.
+            if self._adapter_authorizes_source_via_own_access_policy(source):
                 return True
             # No allowlists configured -- check global allow-all flag
             return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
