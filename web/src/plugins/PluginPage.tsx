@@ -60,5 +60,8 @@ export function PluginPage({ name }: { name: string }) {
 function formatPluginError(code: string, t: Translations): string {
   if (code === "LOAD_FAILED") return t.common.pluginLoadFailed;
   if (code === "NO_REGISTER") return t.common.pluginNotRegistered;
+  if (code === "PROJECT_PLUGIN_SANDBOX_REQUIRED") {
+    return "Project dashboard plugins are listed but not executed in the trusted dashboard origin. Install the plugin in the user plugin directory to trust and run it.";
+  }
   return code;
 }

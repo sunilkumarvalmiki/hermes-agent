@@ -4362,6 +4362,7 @@ def _discover_dashboard_plugins() -> list:
                         "not be mounted",
                         name, raw_api,
                     )
+                trusted_origin = source != "project"
                 plugins.append({
                     "name": name,
                     "label": data.get("label", name),
@@ -4374,6 +4375,10 @@ def _discover_dashboard_plugins() -> list:
                     "css": data.get("css"),
                     "has_api": bool(safe_api),
                     "source": source,
+                    "trusted_origin": trusted_origin,
+                    "frontend_load_mode": (
+                        "trusted_origin" if trusted_origin else "sandbox_required"
+                    ),
                     "_dir": str(dashboard_dir),
                     "_api_file": safe_api,
                 })
@@ -4704,6 +4709,11 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     plugin = next((p for p in plugins if p["name"] == plugin_name), None)
     if not plugin:
         raise HTTPException(status_code=404, detail="Plugin not found")
+    if plugin.get("source") == "project":
+        raise HTTPException(
+            status_code=403,
+            detail="Project dashboard plugin assets require sandboxed loading",
+        )
 
     base = Path(plugin["_dir"])
     target = (base / file_path).resolve()
@@ -4761,9 +4771,10 @@ def _mount_plugin_api_routes():
     Backend import is restricted to ``bundled`` and ``user`` sources.
     Project plugins (``./.hermes/plugins/``) ship with the CWD and are
     therefore attacker-controlled in any threat model where the user
-    opens a malicious repo; they can extend the dashboard UI via
-    static JS/CSS but their Python ``api`` file is never auto-imported
-    by the web server.  See GHSA-5qr3-c538-wm9j (#29156).
+    opens a malicious repo; their Python ``api`` file is never
+    auto-imported by the web server, and their frontend assets are not
+    served into the trusted dashboard origin until a sandboxed loader
+    exists.  See GHSA-5qr3-c538-wm9j (#29156).
     """
     for plugin in _get_dashboard_plugins():
         api_file_name = plugin.get("_api_file")

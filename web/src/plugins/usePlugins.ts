@@ -17,6 +17,14 @@ import {
   setPluginLoadError,
 } from "./registry";
 
+export function isTrustedOriginPlugin(manifest: PluginManifest): boolean {
+  return (
+    manifest.source !== "project" &&
+    manifest.trusted_origin !== false &&
+    manifest.frontend_load_mode !== "sandbox_required"
+  );
+}
+
 export function usePlugins() {
   const [manifests, setManifests] = useState<PluginManifest[]>([]);
   const [plugins, setPlugins] = useState<RegisteredPlugin[]>([]);
@@ -41,6 +49,12 @@ export function usePlugins() {
     const injectedScripts: HTMLScriptElement[] = [];
 
     for (const manifest of manifests) {
+      if (!isTrustedOriginPlugin(manifest)) {
+        setPluginLoadError(manifest.name, "PROJECT_PLUGIN_SANDBOX_REQUIRED");
+        notifyPluginRegistry();
+        continue;
+      }
+
       // Inject CSS if specified.
       if (manifest.css) {
         const cssUrl = `${HERMES_BASE_PATH}/dashboard-plugins/${manifest.name}/${manifest.css}`;

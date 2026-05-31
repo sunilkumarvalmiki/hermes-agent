@@ -29,6 +29,8 @@ export interface PluginManifest {
    */
   integrity?: string;
   source: string;
+  trusted_origin?: boolean;
+  frontend_load_mode?: "trusted_origin" | "sandbox_required" | string;
 }
 
 export interface RegisteredPlugin {

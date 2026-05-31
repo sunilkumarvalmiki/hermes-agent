@@ -358,3 +358,117 @@ class TestEndToEndPocBlocked:
             assert target != payload_py
             assert "evil-repo" not in target.parts
         assert "hermes_dashboard_plugin_evil" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# Layer 6 — Browser-side isolation for project dashboard plugins.
+# ---------------------------------------------------------------------------
+
+
+class TestProjectDashboardPluginBrowserIsolation:
+    """Project dashboard plugins are loaded from the current working tree.
+
+    The Python API path is already blocked above.  This pins the browser-side
+    half of the same trust boundary: project plugin JS/CSS must not execute as
+    trusted dashboard-origin code where it can read the dashboard SDK and API
+    session token.
+    """
+
+    def _make_project_plugin(self, tmp_path, monkeypatch, *, name="evil-browser"):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        (tmp_path / "home").mkdir()
+        cwd = tmp_path / "evil-repo"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "1")
+        dashboard_dir = _write_plugin_manifest(
+            cwd / ".hermes" / "plugins",
+            name,
+            {
+                "name": name,
+                "label": "Evil Browser",
+                "entry": "dist/index.js",
+                "css": "dist/style.css",
+            },
+        )
+        (dashboard_dir / "dist").mkdir()
+        (dashboard_dir / "dist" / "index.js").write_text(
+            "window.__hermes_project_plugin_ran = true;\n",
+            encoding="utf-8",
+        )
+        (dashboard_dir / "dist" / "style.css").write_text(
+            "body { outline: 999px solid red; }\n",
+            encoding="utf-8",
+        )
+        return name
+
+    def test_project_plugin_manifest_is_marked_untrusted_for_frontend(
+        self, tmp_path, monkeypatch
+    ):
+        name = self._make_project_plugin(tmp_path, monkeypatch)
+
+        plugins = web_server._get_dashboard_plugins(force_rescan=True)
+        plugin = next(p for p in plugins if p["name"] == name)
+
+        assert plugin["source"] == "project"
+        assert plugin["trusted_origin"] is False
+        assert plugin["frontend_load_mode"] == "sandbox_required"
+
+    def test_project_plugin_js_is_not_served_as_trusted_origin_asset(
+        self, tmp_path, monkeypatch
+    ):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        name = self._make_project_plugin(tmp_path, monkeypatch)
+
+        client = TestClient(web_server.app)
+        resp = client.get(f"/dashboard-plugins/{name}/dist/index.js")
+
+        assert resp.status_code == 403
+
+    def test_user_plugin_js_still_loads_from_trusted_user_plugin_dir(
+        self, tmp_path, monkeypatch
+    ):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("HERMES_ENABLE_PROJECT_PLUGINS", raising=False)
+        dashboard_dir = _write_plugin_manifest(
+            tmp_path / "home" / "plugins",
+            "trusted-user",
+            {
+                "name": "trusted-user",
+                "label": "Trusted User",
+                "entry": "dist/index.js",
+            },
+        )
+        (dashboard_dir / "dist").mkdir()
+        (dashboard_dir / "dist" / "index.js").write_text(
+            "window.__hermes_user_plugin_ran = true;\n",
+            encoding="utf-8",
+        )
+
+        client = TestClient(web_server.app)
+        resp = client.get("/dashboard-plugins/trusted-user/dist/index.js")
+
+        assert resp.status_code == 200
+        assert "hermes_user_plugin_ran" in resp.text
+
+    def test_frontend_loader_blocks_project_plugins_before_script_injection(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        source = (repo_root / "web" / "src" / "plugins" / "usePlugins.ts").read_text(
+            encoding="utf-8"
+        )
+
+        guard_idx = source.index("isTrustedOriginPlugin(manifest)")
+        script_idx = source.index('document.createElement("script")')
+
+        assert "PROJECT_PLUGIN_SANDBOX_REQUIRED" in source
+        assert "manifest.source !== \"project\"" in source
+        assert guard_idx < script_idx
