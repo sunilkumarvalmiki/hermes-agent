@@ -10,7 +10,9 @@ Usage:
 """
 
 import asyncio
+import functools
 import hmac
+import inspect
 import importlib.util
 import json
 import logging
@@ -3363,6 +3365,7 @@ except ImportError as _pty_import_err:  # pragma: no cover - Windows-only path
 _RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
 _PTY_READ_CHUNK_TIMEOUT = 0.2
 _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_DASHBOARD_WS_AUTH_SCOPE_KEY = "hermes.dashboard_ws_authenticated"
 # Starlette's TestClient reports the peer as "testclient"; treat it as
 # loopback so tests don't need to rewrite request scope.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
@@ -3486,6 +3489,91 @@ def _ws_auth_ok(ws: "WebSocket") -> bool:
 
     token = ws.query_params.get("token", "")
     return hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
+
+
+def is_dashboard_websocket_authenticated(ws: "WebSocket") -> bool:
+    """Return True when the central dashboard WS guard authenticated scope."""
+    return bool(ws.scope.get(_DASHBOARD_WS_AUTH_SCOPE_KEY))
+
+
+async def require_dashboard_websocket_auth(ws: "WebSocket") -> bool:
+    """Enforce the dashboard WebSocket auth and Host/Origin boundary.
+
+    Plugin WebSocket routes do not pass through HTTP middleware, so mounted
+    plugin routers use this helper centrally. Plugins that are tested or
+    mounted outside the dashboard can also call it directly.
+    """
+    if is_dashboard_websocket_authenticated(ws):
+        return True
+
+    if not _ws_auth_ok(ws):
+        await ws.close(code=4401)
+        return False
+
+    if not _ws_request_is_allowed(ws):
+        await ws.close(code=4403)
+        return False
+
+    ws.scope[_DASHBOARD_WS_AUTH_SCOPE_KEY] = True
+    return True
+
+
+def _extract_websocket_arg(args: tuple, kwargs: dict) -> Optional["WebSocket"]:
+    for value in args:
+        if isinstance(value, WebSocket):
+            return value
+    for value in kwargs.values():
+        if isinstance(value, WebSocket):
+            return value
+    return None
+
+
+def _guard_plugin_websocket_endpoint(endpoint, *, plugin_name: str, route_path: str):
+    @functools.wraps(endpoint)
+    async def _guarded_plugin_websocket(*args, **kwargs):
+        ws = _extract_websocket_arg(args, kwargs)
+        if ws is None:
+            _log.warning(
+                "Plugin %s WebSocket route %s has no WebSocket parameter; "
+                "closing before endpoint execution",
+                plugin_name,
+                route_path,
+            )
+            return None
+        if not await require_dashboard_websocket_auth(ws):
+            return None
+        result = endpoint(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    _guarded_plugin_websocket.__signature__ = inspect.signature(endpoint)
+    setattr(_guarded_plugin_websocket, "_hermes_dashboard_ws_guarded", True)
+    return _guarded_plugin_websocket
+
+
+def _guard_plugin_websocket_routes(router, *, plugin_name: str) -> int:
+    """Wrap plugin WebSocket route endpoints with the central dashboard guard."""
+    try:
+        from fastapi.routing import APIWebSocketRoute
+        from starlette.routing import WebSocketRoute
+    except Exception:
+        return 0
+
+    guarded = 0
+    for route in getattr(router, "routes", []):
+        if not isinstance(route, (APIWebSocketRoute, WebSocketRoute)):
+            continue
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None or getattr(endpoint, "_hermes_dashboard_ws_guarded", False):
+            continue
+        route.endpoint = _guard_plugin_websocket_endpoint(
+            endpoint,
+            plugin_name=plugin_name,
+            route_path=getattr(route, "path", "<unknown>"),
+        )
+        guarded += 1
+    return guarded
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
@@ -4832,8 +4920,16 @@ def _mount_plugin_api_routes():
             if router is None:
                 _log.warning("Plugin %s api file has no 'router' attribute", plugin["name"])
                 continue
+            guarded_ws_routes = _guard_plugin_websocket_routes(
+                router,
+                plugin_name=plugin["name"],
+            )
             app.include_router(router, prefix=f"/api/plugins/{plugin['name']}")
-            _log.info("Mounted plugin API routes: /api/plugins/%s/", plugin["name"])
+            _log.info(
+                "Mounted plugin API routes: /api/plugins/%s/ (%d websocket route(s) guarded)",
+                plugin["name"],
+                guarded_ws_routes,
+            )
         except Exception as exc:
             _log.warning("Failed to load plugin %s API routes: %s", plugin["name"], exc)
 

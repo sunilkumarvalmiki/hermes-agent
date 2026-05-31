@@ -1905,18 +1905,16 @@ class TestPluginAPIAuth:
         resp = self.client.get("/api/plugins/_definitely_not_a_plugin_/anything")
         assert resp.status_code == 401
 
-    def test_plugin_websocket_unaffected_by_http_middleware(self):
-        """The kanban /events WebSocket has its own ``?token=`` check;
-        the HTTP middleware change must not start gating WS upgrades.
+    def test_plugin_websocket_rejected_by_websocket_guard_not_http_middleware(self):
+        """Plugin WebSocket auth must happen in a WebSocket-aware layer.
 
-        Starlette doesn't run HTTP middleware on WebSocket upgrades anyway,
-        but pin the behavior so a future refactor that moves auth into a
-        shared layer can't silently break the WS auth contract.
+        Starlette doesn't run HTTP middleware on WebSocket upgrades, so a
+        rejection here should be a WebSocket close rather than an HTTP 401.
         """
         from starlette.websockets import WebSocketDisconnect
 
-        # Without a token the WS endpoint must close the upgrade itself
-        # (its own _check_ws_token), NOT 401 from the HTTP middleware.
+        # Without a token the WS endpoint must close the upgrade through
+        # the dashboard WebSocket guard, NOT 401 from the HTTP middleware.
         try:
             with self.client.websocket_connect(
                 "/api/plugins/kanban/events"
@@ -1928,8 +1926,97 @@ class TestPluginAPIAuth:
             # The kanban plugin may not be mounted in this test environment,
             # in which case the route doesn't exist at all (3xx/4xx during
             # upgrade). That's fine for this regression — it only matters
-            # that the HTTP middleware didn't start intercepting WS upgrades.
+            # that auth does not rely on HTTP middleware intercepting WS upgrades.
             pass
+
+    def test_plugin_websocket_routes_get_central_dashboard_ws_auth(
+        self, tmp_path, monkeypatch,
+    ):
+        """A plugin WebSocket without its own auth must still be guarded.
+
+        FastAPI HTTP middleware does not run for WebSocket upgrades, so the
+        dashboard must wrap plugin WebSocket routes at mount time instead of
+        relying on each plugin to copy the core dashboard token checks.
+        """
+        from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+
+        from hermes_cli import web_server
+
+        dashboard_dir = tmp_path / "plugins" / "unsafe-ws" / "dashboard"
+        dashboard_dir.mkdir(parents=True)
+        (dashboard_dir / "plugin_api.py").write_text(
+            "from fastapi import APIRouter, WebSocket\n"
+            "router = APIRouter()\n"
+            "@router.websocket('/unsafe')\n"
+            "async def unsafe(ws: WebSocket):\n"
+            "    await ws.accept()\n"
+            "    await ws.send_text('accepted')\n",
+            encoding="utf-8",
+        )
+        plugin = {
+            "name": "unsafe-ws",
+            "source": "user",
+            "_api_file": "plugin_api.py",
+            "_dir": str(dashboard_dir),
+        }
+        original_routes = list(web_server.app.router.routes)
+        had_bound_host = hasattr(web_server.app.state, "bound_host")
+        had_listen_host = hasattr(web_server.app.state, "listen_host")
+        had_auth_required = hasattr(web_server.app.state, "auth_required")
+        prev_bound_host = getattr(web_server.app.state, "bound_host", None)
+        prev_listen_host = getattr(web_server.app.state, "listen_host", None)
+        prev_auth_required = getattr(web_server.app.state, "auth_required", None)
+        try:
+            monkeypatch.setattr(
+                web_server,
+                "_get_dashboard_plugins",
+                lambda force_rescan=False: [plugin],
+            )
+            web_server._mount_plugin_api_routes()
+            web_server.app.state.bound_host = "127.0.0.1"
+            web_server.app.state.listen_host = "127.0.0.1"
+            web_server.app.state.auth_required = False
+            client = TestClient(
+                web_server.app,
+                base_url="http://127.0.0.1:9119",
+            )
+
+            with pytest.raises(WebSocketDisconnect) as missing_auth:
+                with client.websocket_connect(
+                    "/api/plugins/unsafe-ws/unsafe",
+                    headers={"Host": "127.0.0.1:9119"},
+                ):
+                    pass
+            assert missing_auth.value.code == 4401
+
+            with pytest.raises(WebSocketDisconnect) as bad_host:
+                with client.websocket_connect(
+                    f"/api/plugins/unsafe-ws/unsafe?token={web_server._SESSION_TOKEN}",
+                    headers={"Host": "evil.example"},
+                ):
+                    pass
+            assert bad_host.value.code == 4403
+
+            with client.websocket_connect(
+                f"/api/plugins/unsafe-ws/unsafe?token={web_server._SESSION_TOKEN}",
+                headers={"Host": "127.0.0.1:9119"},
+            ) as ws:
+                assert ws.receive_text() == "accepted"
+        finally:
+            web_server.app.router.routes[:] = original_routes
+            if had_bound_host:
+                web_server.app.state.bound_host = prev_bound_host
+            elif hasattr(web_server.app.state, "bound_host"):
+                del web_server.app.state.bound_host
+            if had_listen_host:
+                web_server.app.state.listen_host = prev_listen_host
+            elif hasattr(web_server.app.state, "listen_host"):
+                del web_server.app.state.listen_host
+            if had_auth_required:
+                web_server.app.state.auth_required = prev_auth_required
+            elif hasattr(web_server.app.state, "auth_required"):
+                del web_server.app.state.auth_required
 
 
 class TestDashboardPluginManifestExtensions:

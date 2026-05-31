@@ -60,7 +60,7 @@ router = APIRouter()
 
 # ---------------------------------------------------------------------------
 # Auth helper — WebSocket only (HTTP routes live behind the dashboard's
-# existing plugin-bypass; this is documented above).
+# existing plugin gate; this is documented above).
 # ---------------------------------------------------------------------------
 
 def _check_ws_token(provided: Optional[str]) -> bool:
@@ -83,6 +83,27 @@ def _check_ws_token(provided: Optional[str]) -> bool:
     if not expected:
         return True
     return hmac.compare_digest(str(provided), str(expected))
+
+
+async def _ensure_ws_authenticated(ws: WebSocket) -> bool:
+    """Use the dashboard's central WS guard when mounted by the dashboard.
+
+    The fallback keeps the plugin's standalone tests and direct router usage
+    protected when the dashboard module is not present.
+    """
+    try:
+        from hermes_cli import web_server as _ws
+    except Exception:
+        _ws = None
+    require_ws_auth = getattr(_ws, "require_dashboard_websocket_auth", None)
+    if require_ws_auth is not None and hasattr(ws, "scope"):
+        return bool(await require_ws_auth(ws))
+
+    token = ws.query_params.get("token")
+    if not _check_ws_token(token):
+        await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
+        return False
+    return True
 
 
 def _resolve_board(board: Optional[str]) -> Optional[str]:
@@ -2371,12 +2392,7 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
 
 @router.websocket("/events")
 async def stream_events(ws: WebSocket):
-    # Enforce the dashboard session token as a query param — browsers can't
-    # set Authorization on a WS upgrade. This matches how the PTY bridge
-    # authenticates in hermes_cli/web_server.py.
-    token = ws.query_params.get("token")
-    if not _check_ws_token(token):
-        await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
+    if not await _ensure_ws_authenticated(ws):
         return
     await ws.accept()
     try:
