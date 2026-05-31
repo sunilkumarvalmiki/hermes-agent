@@ -122,9 +122,27 @@ class TestWebServerEndpoints:
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
-    def test_dashboard_html_disallows_framing(self):
-        resp = self.client.get("/")
+    def test_dashboard_html_disallows_framing(self, monkeypatch, tmp_path):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+
+        import hermes_cli.web_server as web_server
+
+        web_dist = tmp_path / "web_dist"
+        (web_dist / "assets").mkdir(parents=True)
+        (web_dist / "index.html").write_text(
+            "<!doctype html><html><head></head><body></body></html>",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(web_server, "WEB_DIST", web_dist)
+
+        app = FastAPI()
+        app.middleware("http")(web_server.dashboard_anti_framing_middleware)
+        web_server.mount_spa(app)
+
+        resp = TestClient(app).get("/")
         assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/html")
         _assert_dashboard_anti_framing_headers(resp)
 
     def test_get_status(self):
