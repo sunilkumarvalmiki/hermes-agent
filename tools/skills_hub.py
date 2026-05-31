@@ -60,6 +60,7 @@ INDEX_CACHE_TTL = 3600  # 1 hour
 
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 _MAX_SKILL_FETCH_REDIRECTS = 5
+_MAX_SKILL_FETCH_BYTES = 10 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +190,39 @@ def _resolve_lock_install_path(install_path: str, skill_name: str) -> Path:
     return target
 
 
-def _guarded_http_get(url: str, *, timeout: int = 20) -> Optional[httpx.Response]:
+def _response_exceeds_size_limit(resp: httpx.Response, max_bytes: int) -> bool:
+    headers = getattr(resp, "headers", {}) or {}
+    try:
+        content_length = headers.get("content-length") or headers.get("Content-Length")
+    except AttributeError:
+        content_length = None
+
+    if content_length is not None:
+        try:
+            if int(content_length) > max_bytes:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    content = getattr(resp, "content", None)
+    if isinstance(content, (bytes, bytearray)) and len(content) > max_bytes:
+        return True
+
+    text = getattr(resp, "text", None)
+    return isinstance(text, str) and len(text.encode("utf-8")) > max_bytes
+
+
+def _guarded_http_get(
+    url: str,
+    *,
+    timeout: int = 20,
+    params: Optional[Dict[str, Any]] = None,
+    max_bytes: int = _MAX_SKILL_FETCH_BYTES,
+) -> Optional[httpx.Response]:
     """Fetch a URL with SSRF and redirect-target validation."""
     current_url = url
 
-    for _ in range(_MAX_SKILL_FETCH_REDIRECTS + 1):
+    for redirect_count in range(_MAX_SKILL_FETCH_REDIRECTS + 1):
         if not is_safe_url(current_url):
             logger.warning("Blocked unsafe Skills Hub URL: %s", current_url)
             return None
@@ -208,7 +237,12 @@ def _guarded_http_get(url: str, *, timeout: int = 20) -> Optional[httpx.Response
             return None
 
         try:
-            resp = httpx.get(current_url, timeout=timeout, follow_redirects=False)
+            resp = httpx.get(
+                current_url,
+                params=params if redirect_count == 0 else None,
+                timeout=timeout,
+                follow_redirects=False,
+            )
         except httpx.HTTPError as exc:
             logger.debug("Skills Hub fetch failed for %s: %s", current_url, exc)
             return None
@@ -219,6 +253,10 @@ def _guarded_http_get(url: str, *, timeout: int = 20) -> Optional[httpx.Response
                 return None
             current_url = urljoin(current_url, location)
             continue
+
+        if _response_exceeds_size_limit(resp, max_bytes):
+            logger.warning("Blocked oversized Skills Hub response from %s", current_url)
+            return None
 
         return resp
 
@@ -2295,12 +2333,13 @@ class ClawHubSource(SkillSource):
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                resp = httpx.get(
+                resp = _guarded_http_get(
                     f"{self.BASE_URL}/download",
                     params={"slug": slug, "version": version},
                     timeout=30,
-                    follow_redirects=True,
                 )
+                if resp is None:
+                    return files
                 if resp.status_code == 429:
                     try:
                         retry_after = int(resp.headers.get("retry-after", "5"))
@@ -2731,7 +2770,9 @@ class BrowseShSource(SkillSource):
         if not md_url:
             return None
         try:
-            resp = httpx.get(md_url, timeout=20, follow_redirects=True)
+            resp = _guarded_http_get(md_url, timeout=20)
+            if resp is None:
+                return None
             if resp.status_code != 200:
                 return None
             content = resp.text
@@ -2762,11 +2803,12 @@ class BrowseShSource(SkillSource):
         ``sourceUrl`` (some entries may), use it directly.
         """
         try:
-            detail = httpx.get(
+            detail = _guarded_http_get(
                 self.SKILL_DETAIL_URL.format(slug=slug),
                 timeout=20,
-                follow_redirects=True,
             )
+            if detail is None:
+                return None
             if detail.status_code == 200:
                 data = detail.json()
                 if isinstance(data, dict):

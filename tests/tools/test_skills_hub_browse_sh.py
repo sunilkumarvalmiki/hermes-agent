@@ -130,6 +130,63 @@ class TestBrowseShSource(unittest.TestCase):
         result = self.src.fetch("browse-sh/nonexistent.com/no-such-skill")
         self.assertIsNone(result)
 
+    @patch("tools.skills_hub.check_website_access", return_value=None)
+    @patch("tools.skills_hub.is_safe_url")
+    @patch("tools.skills_hub.httpx.get")
+    @patch.object(BrowseShSource, "_fetch_catalog", return_value=SAMPLE_CATALOG)
+    def test_fetch_blocks_skill_md_redirect_to_private_url(
+        self, _mock_catalog, mock_get, mock_safe, _mock_policy
+    ):
+        blob_url = (
+            "https://gh0lfhlmyzhg6tww.public.blob.vercel-storage.com"
+            "/skills/airbnb.com/search-listings-ddgioa/SKILL.md"
+        )
+
+        def side_effect(url, *args, **kwargs):
+            if "/api/skills/airbnb.com/search-listings-ddgioa" in url:
+                return _MockResponse(status_code=200, json_data={"skillMdUrl": blob_url})
+            if url == blob_url:
+                if kwargs.get("follow_redirects") is True:
+                    return _MockResponse(status_code=200, text="# Internal skill")
+                return _MockResponse(
+                    status_code=302,
+                    headers={"location": "http://127.0.0.1/private/SKILL.md"},
+                )
+            return _MockResponse(status_code=404)
+
+        mock_get.side_effect = side_effect
+        mock_safe.side_effect = lambda url: not url.startswith("http://127.0.0.1/")
+
+        self.assertIsNone(self.src.fetch("browse-sh/airbnb.com/search-listings-ddgioa"))
+
+    @patch("tools.skills_hub.check_website_access", return_value=None)
+    @patch("tools.skills_hub.is_safe_url")
+    @patch("tools.skills_hub.httpx.get")
+    def test_resolve_skill_md_url_blocks_detail_redirect_to_private_url(
+        self, mock_get, mock_safe, _mock_policy
+    ):
+        blob_url = "https://cdn.example.com/skill/SKILL.md"
+
+        def side_effect(url, *args, **kwargs):
+            if "/api/skills/airbnb.com/search-listings-ddgioa" in url:
+                if kwargs.get("follow_redirects") is True:
+                    return _MockResponse(status_code=200, json_data={"skillMdUrl": blob_url})
+                return _MockResponse(
+                    status_code=302,
+                    headers={"location": "http://127.0.0.1/detail"},
+                )
+            return _MockResponse(status_code=404)
+
+        mock_get.side_effect = side_effect
+        mock_safe.side_effect = lambda url: not url.startswith("http://127.0.0.1/")
+
+        self.assertIsNone(
+            self.src._resolve_skill_md_url(
+                "airbnb.com/search-listings-ddgioa",
+                SAMPLE_CATALOG[0],
+            )
+        )
+
     @patch.object(BrowseShSource, "_fetch_catalog", return_value=SAMPLE_CATALOG)
     def test_inspect_returns_meta(self, _mock_catalog):
         meta = self.src.inspect("browse-sh/airbnb.com/search-listings-ddgioa")

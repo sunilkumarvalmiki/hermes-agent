@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 
+import io
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from tools.skills_hub import ClawHubSource, SkillMeta
 
 
 class _MockResponse:
-    def __init__(self, status_code=200, json_data=None, text="", headers=None):
+    def __init__(self, status_code=200, json_data=None, text="", headers=None, content=b""):
         self.status_code = status_code
         self._json_data = json_data
         self.text = text
         self.headers = headers or {}
+        self.content = content
 
     def json(self):
         return self._json_data
@@ -297,6 +300,29 @@ class TestClawHubSource(unittest.TestCase):
 
         self.assertIsNone(bundle)
         self.assertEqual(mock_get.call_count, 3)
+
+    @patch("tools.skills_hub.check_website_access", return_value=None)
+    @patch("tools.skills_hub.is_safe_url")
+    @patch("tools.skills_hub.httpx.get")
+    def test_download_zip_blocks_redirect_to_private_url(self, mock_get, mock_safe, _mock_policy):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("SKILL.md", "# Internal skill")
+
+        def side_effect(url, *args, **kwargs):
+            if url.endswith("/download"):
+                if kwargs.get("follow_redirects") is True:
+                    return _MockResponse(status_code=200, content=archive.getvalue())
+                return _MockResponse(
+                    status_code=302,
+                    headers={"location": "http://127.0.0.1/private-skill.zip"},
+                )
+            return _MockResponse(status_code=404, json_data={})
+
+        mock_get.side_effect = side_effect
+        mock_safe.side_effect = lambda url: not url.startswith("http://127.0.0.1/")
+
+        self.assertEqual(self.src._download_zip("caldav-calendar", "1.0.1"), {})
 
     @patch("tools.skills_hub._write_index_cache")
     @patch("tools.skills_hub._read_index_cache", return_value=None)
