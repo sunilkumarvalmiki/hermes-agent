@@ -28,6 +28,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    read_aiohttp_url_bytes_with_safe_redirects,
 )
 
 logger = logging.getLogger(__name__)
@@ -438,19 +439,23 @@ class MattermostAdapter(BasePlatformAdapter):
 
         for attempt in range(3):
             try:
-                async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status >= 500 or resp.status == 429:
-                        if attempt < 2:
-                            logger.debug("Mattermost download retry %d/2 for %s (status %d)",
-                                         attempt + 1, url[:80], resp.status)
-                            await asyncio.sleep(1.5 * (attempt + 1))
-                            continue
-                    if resp.status >= 400:
-                        return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
-                    file_data = await resp.read()
-                    ct = resp.content_type or "application/octet-stream"
-                    break
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                download = await read_aiohttp_url_bytes_with_safe_redirects(
+                    self._session,
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                )
+                if download.status >= 500 or download.status == 429:
+                    if attempt < 2:
+                        logger.debug("Mattermost download retry %d/2 for %s (status %d)",
+                                     attempt + 1, url[:80], download.status)
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+                if download.status >= 400:
+                    return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+                file_data = download.data
+                ct = download.content_type or "application/octet-stream"
+                break
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
                 if attempt < 2:
                     await asyncio.sleep(1.5 * (attempt + 1))
                     continue
@@ -568,17 +573,19 @@ class MattermostAdapter(BasePlatformAdapter):
                             logger.warning("Mattermost: blocked unsafe image URL in batch")
                             continue
                         try:
-                            async with self._session.get(
-                                image_url, timeout=aiohttp.ClientTimeout(total=30)
-                            ) as resp:
-                                if resp.status >= 400:
-                                    logger.warning(
-                                        "Mattermost: failed to download image (HTTP %d): %s",
-                                        resp.status, image_url[:80],
-                                    )
-                                    continue
-                                file_data = await resp.read()
-                                ct = resp.content_type or "image/png"
+                            download = await read_aiohttp_url_bytes_with_safe_redirects(
+                                self._session,
+                                image_url,
+                                timeout=aiohttp.ClientTimeout(total=30),
+                            )
+                            if download.status >= 400:
+                                logger.warning(
+                                    "Mattermost: failed to download image (HTTP %d): %s",
+                                    download.status, image_url[:80],
+                                )
+                                continue
+                            file_data = download.data
+                            ct = download.content_type or "image/png"
                         except Exception as dl_err:
                             logger.warning("Mattermost: download failed for %s: %s", image_url[:80], dl_err)
                             continue

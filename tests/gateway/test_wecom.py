@@ -424,7 +424,7 @@ class TestMediaUpload:
                 yield b"abc"
 
         class FakeClient:
-            def stream(self, method, url, headers=None):
+            def stream(self, method, url, **kwargs):
                 return FakeResponse()
 
         adapter = WeComAdapter(PlatformConfig(enabled=True))
@@ -432,6 +432,46 @@ class TestMediaUpload:
 
         with pytest.raises(ValueError, match="exceeds WeCom limit"):
             await adapter._download_remote_bytes("https://example.com/file.bin", max_bytes=4)
+
+    @pytest.mark.asyncio
+    async def test_download_remote_bytes_rejects_redirect_to_loopback(self, monkeypatch):
+        from gateway.platforms.wecom import WeComAdapter
+
+        class FakeResponse:
+            status_code = 302
+            headers = {"location": "http://127.0.0.1/admin"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self):
+                yield b"redirect body"
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def stream(self, method, url, **kwargs):
+                self.calls.append((method, url, kwargs))
+                return FakeResponse()
+
+        monkeypatch.setattr(
+            "tools.url_safety.is_safe_url",
+            lambda url: not str(url).startswith("http://127.0.0.1"),
+        )
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._http_client = FakeClient()
+
+        with pytest.raises(ValueError, match="Blocked redirect"):
+            await adapter._download_remote_bytes("https://example.com/file.bin", max_bytes=1024)
+
+        assert adapter._http_client.calls[0][2]["follow_redirects"] is False
 
     @pytest.mark.asyncio
     async def test_cache_media_decrypts_url_payload_before_writing(self):

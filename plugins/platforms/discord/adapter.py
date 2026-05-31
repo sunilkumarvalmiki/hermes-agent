@@ -64,6 +64,7 @@ from gateway.platforms.base import (
     cache_audio_from_bytes,
     cache_document_from_bytes,
     SUPPORTED_DOCUMENT_TYPES,
+    read_aiohttp_url_bytes_with_safe_redirects,
 )
 from tools.url_safety import is_safe_url
 
@@ -1761,25 +1762,28 @@ class DiscordAdapter(BasePlatformAdapter):
                             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
                             if aiohttp_session is None:
                                 aiohttp_session = _aiohttp.ClientSession(**_sess_kw)
-                            async with aiohttp_session.get(
-                                image_url, timeout=_aiohttp.ClientTimeout(total=30), **_req_kw,
-                            ) as resp:
-                                if resp.status != 200:
-                                    logger.warning(
-                                        "[%s] Failed to download image (HTTP %d) in batch: %s",
-                                        self.name, resp.status, image_url[:80],
-                                    )
-                                    continue
-                                data = await resp.read()
-                                ct = resp.headers.get("content-type", "image/png")
-                                ext = "png"
-                                if "jpeg" in ct or "jpg" in ct:
-                                    ext = "jpg"
-                                elif "gif" in ct:
-                                    ext = "gif"
-                                elif "webp" in ct:
-                                    ext = "webp"
-                                files.append(_discord_mod.File(_io.BytesIO(data), filename=f"image_{len(files)}.{ext}"))
+                            download = await read_aiohttp_url_bytes_with_safe_redirects(
+                                aiohttp_session,
+                                image_url,
+                                timeout=_aiohttp.ClientTimeout(total=30),
+                                request_kwargs=_req_kw,
+                            )
+                            if download.status != 200:
+                                logger.warning(
+                                    "[%s] Failed to download image (HTTP %d) in batch: %s",
+                                    self.name, download.status, image_url[:80],
+                                )
+                                continue
+                            data = download.data
+                            ct = download.headers.get("content-type", "image/png")
+                            ext = "png"
+                            if "jpeg" in ct or "jpg" in ct:
+                                ext = "jpg"
+                            elif "gif" in ct:
+                                ext = "gif"
+                            elif "webp" in ct:
+                                ext = "webp"
+                            files.append(_discord_mod.File(_io.BytesIO(data), filename=f"image_{len(files)}.{ext}"))
                         except Exception as dl_err:
                             logger.warning("[%s] Download failed for %s: %s", self.name, image_url[:80], dl_err)
                             continue
@@ -2585,37 +2589,42 @@ class DiscordAdapter(BasePlatformAdapter):
             _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
             async with aiohttp.ClientSession(**_sess_kw) as session:
-                async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"Failed to download image: HTTP {resp.status}")
+                download = await read_aiohttp_url_bytes_with_safe_redirects(
+                    session,
+                    image_url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    request_kwargs=_req_kw,
+                )
+                if download.status != 200:
+                    raise Exception(f"Failed to download image: HTTP {download.status}")
 
-                    image_data = await resp.read()
+                image_data = download.data
 
-                    # Determine filename from URL or content type
-                    content_type = resp.headers.get("content-type", "image/png")
-                    ext = "png"
-                    if "jpeg" in content_type or "jpg" in content_type:
-                        ext = "jpg"
-                    elif "gif" in content_type:
-                        ext = "gif"
-                    elif "webp" in content_type:
-                        ext = "webp"
+                # Determine filename from URL or content type
+                content_type = download.headers.get("content-type", "image/png")
+                ext = "png"
+                if "jpeg" in content_type or "jpg" in content_type:
+                    ext = "jpg"
+                elif "gif" in content_type:
+                    ext = "gif"
+                elif "webp" in content_type:
+                    ext = "webp"
 
-                    import io
-                    file = discord.File(io.BytesIO(image_data), filename=f"image.{ext}")
+                import io
+                file = discord.File(io.BytesIO(image_data), filename=f"image.{ext}")
 
-                    if self._is_forum_parent(channel):
-                        return await self._forum_post_file(
-                            channel,
-                            content=(caption or "").strip(),
-                            file=file,
-                        )
-
-                    msg = await channel.send(
-                        content=caption if caption else None,
+                if self._is_forum_parent(channel):
+                    return await self._forum_post_file(
+                        channel,
+                        content=(caption or "").strip(),
                         file=file,
                     )
-                    return SendResult(success=True, message_id=str(msg.id))
+
+                msg = await channel.send(
+                    content=caption if caption else None,
+                    file=file,
+                )
+                return SendResult(success=True, message_id=str(msg.id))
 
         except ImportError:
             logger.warning(
@@ -2664,27 +2673,32 @@ class DiscordAdapter(BasePlatformAdapter):
             _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
             async with aiohttp.ClientSession(**_sess_kw) as session:
-                async with session.get(animation_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"Failed to download animation: HTTP {resp.status}")
+                download = await read_aiohttp_url_bytes_with_safe_redirects(
+                    session,
+                    animation_url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    request_kwargs=_req_kw,
+                )
+                if download.status != 200:
+                    raise Exception(f"Failed to download animation: HTTP {download.status}")
 
-                    animation_data = await resp.read()
+                animation_data = download.data
 
-                    import io
-                    file = discord.File(io.BytesIO(animation_data), filename="animation.gif")
+                import io
+                file = discord.File(io.BytesIO(animation_data), filename="animation.gif")
 
-                    if self._is_forum_parent(channel):
-                        return await self._forum_post_file(
-                            channel,
-                            content=(caption or "").strip(),
-                            file=file,
-                        )
-
-                    msg = await channel.send(
-                        content=caption if caption else None,
+                if self._is_forum_parent(channel):
+                    return await self._forum_post_file(
+                        channel,
+                        content=(caption or "").strip(),
                         file=file,
                     )
-                    return SendResult(success=True, message_id=str(msg.id))
+
+                msg = await channel.send(
+                    content=caption if caption else None,
+                    file=file,
+                )
+                return SendResult(success=True, message_id=str(msg.id))
 
         except ImportError:
             logger.warning(
@@ -4475,14 +4489,15 @@ class DiscordAdapter(BasePlatformAdapter):
         _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         async with aiohttp.ClientSession(**_sess_kw) as session:
-            async with session.get(
+            download = await read_aiohttp_url_bytes_with_safe_redirects(
+                session,
                 att.url,
                 timeout=aiohttp.ClientTimeout(total=30),
-                **_req_kw,
-            ) as resp:
-                if resp.status != 200:
-                    raise Exception(f"HTTP {resp.status}")
-                return await resp.read()
+                request_kwargs=_req_kw,
+            )
+            if download.status != 200:
+                raise Exception(f"HTTP {download.status}")
+            return download.data
 
     async def _handle_message(self, message: DiscordMessage) -> None:
         """Handle incoming Discord messages."""

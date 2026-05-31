@@ -2605,30 +2605,43 @@ class TestFallbackPreservesThreadContext:
 class TestSendImageSSRFGuards:
     """send_image should reject redirects that land on private/internal hosts."""
 
-    @pytest.mark.asyncio
-    async def test_send_image_blocks_private_redirect_target(self, adapter):
-        redirect_response = MagicMock()
-        redirect_response.is_redirect = True
-        redirect_response.next_request = MagicMock(
-            url="http://169.254.169.254/latest/meta-data"
-        )
-
+    @staticmethod
+    def _redirecting_httpx_client():
         client_kwargs = {}
+        stream_calls = []
+
+        redirect_response = MagicMock()
+        redirect_response.status_code = 302
+        redirect_response.headers = {"location": "http://169.254.169.254/latest/meta-data"}
+
+        class RedirectStream:
+            async def __aenter__(self):
+                return redirect_response
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        async def fake_get(_url):
-            for hook in client_kwargs["event_hooks"]["response"]:
-                await hook(redirect_response)
+        def fake_stream(method, url, **kwargs):
+            stream_calls.append((method, url, kwargs))
+            return RedirectStream()
 
-        mock_client.get = AsyncMock(side_effect=fake_get)
-        adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
-        adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "reply_ts"})
+        mock_client.stream = MagicMock(side_effect=fake_stream)
 
         def fake_async_client(*args, **kwargs):
             client_kwargs.update(kwargs)
             return mock_client
+
+        return fake_async_client, client_kwargs, stream_calls
+
+    @pytest.mark.asyncio
+    async def test_send_image_blocks_private_redirect_target(self, adapter):
+        fake_async_client, _client_kwargs, stream_calls = self._redirecting_httpx_client()
+        adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
+        adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "reply_ts"})
 
         def fake_is_safe_url(url):
             return url == "https://public.example/image.png"
@@ -2644,8 +2657,7 @@ class TestSendImageSSRFGuards:
             )
 
         assert result.success
-        assert client_kwargs["follow_redirects"] is True
-        assert client_kwargs["event_hooks"]["response"]
+        assert stream_calls[0][2]["follow_redirects"] is False
         adapter._app.client.files_upload_v2.assert_not_awaited()
         adapter._app.client.chat_postMessage.assert_awaited_once()
         call_kwargs = adapter._app.client.chat_postMessage.call_args.kwargs
@@ -2654,28 +2666,9 @@ class TestSendImageSSRFGuards:
 
     @pytest.mark.asyncio
     async def test_send_image_fallback_preserves_thread_metadata(self, adapter):
-        redirect_response = MagicMock()
-        redirect_response.is_redirect = True
-        redirect_response.next_request = MagicMock(
-            url="http://169.254.169.254/latest/meta-data"
-        )
-
-        client_kwargs = {}
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        async def fake_get(_url):
-            for hook in client_kwargs["event_hooks"]["response"]:
-                await hook(redirect_response)
-
-        mock_client.get = AsyncMock(side_effect=fake_get)
+        fake_async_client, _client_kwargs, _stream_calls = self._redirecting_httpx_client()
         adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
         adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "reply_ts"})
-
-        def fake_async_client(*args, **kwargs):
-            client_kwargs.update(kwargs)
-            return mock_client
 
         def fake_is_safe_url(url):
             return url == "https://public.example/image.png"

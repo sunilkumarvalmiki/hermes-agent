@@ -67,6 +67,7 @@ from gateway.platforms.base import (
     SendResult,
     cache_document_from_bytes,
     cache_image_from_bytes,
+    read_httpx_url_bytes_with_safe_redirects,
 )
 
 logger = logging.getLogger(__name__)
@@ -1099,34 +1100,21 @@ class WeComAdapter(BasePlatformAdapter):
         if not HTTPX_AVAILABLE:
             raise RuntimeError("httpx is required for WeCom media download")
 
-        client = self._http_client or httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+        client = self._http_client or httpx.AsyncClient(timeout=30.0)
         created_client = client is not self._http_client
         try:
-            async with client.stream(
-                "GET",
+            download = await read_httpx_url_bytes_with_safe_redirects(
+                client,
                 url,
                 headers={
                     "User-Agent": "HermesAgent/1.0",
                     "Accept": "*/*",
                 },
-            ) as response:
-                response.raise_for_status()
-                headers = {key.lower(): value for key, value in response.headers.items()}
-                content_length = headers.get("content-length")
-                if content_length and content_length.isdigit() and int(content_length) > max_bytes:
-                    raise ValueError(
-                        f"Remote media exceeds WeCom limit: {int(content_length)} bytes > {max_bytes} bytes"
-                    )
-
-                data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > max_bytes:
-                        raise ValueError(
-                            f"Remote media exceeds WeCom limit while downloading: {len(data)} bytes > {max_bytes} bytes"
-                        )
-
-                return bytes(data), headers
+                timeout=30.0,
+                max_bytes=max_bytes,
+                max_bytes_error_context="WeCom limit",
+            )
+            return download.data, download.headers
         finally:
             if created_client:
                 await client.aclose()

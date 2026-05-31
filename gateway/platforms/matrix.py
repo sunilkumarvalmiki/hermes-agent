@@ -102,6 +102,8 @@ from gateway.platforms.base import (
     SendResult,
     resolve_proxy_url,
     proxy_kwargs_for_aiohttp,
+    read_aiohttp_url_bytes_with_safe_redirects,
+    read_httpx_url_bytes_with_safe_redirects,
 )
 from gateway.platforms.helpers import ThreadParticipationTracker
 
@@ -1171,27 +1173,31 @@ class MatrixAdapter(BasePlatformAdapter):
                 import aiohttp as _aiohttp
                 _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(self._proxy_url)
                 async with _aiohttp.ClientSession(**_sess_kw) as http:
-                    async with http.get(
+                    download = await read_aiohttp_url_bytes_with_safe_redirects(
+                        http,
                         image_url,
                         timeout=_aiohttp.ClientTimeout(total=30),
-                        **_req_kw,
-                    ) as resp:
-                        resp.raise_for_status()
-                        data = await resp.read()
-                        ct = resp.content_type or "image/png"
-                        fname = (
-                            image_url.rsplit("/", 1)[-1].split("?")[0] or "image.png"
-                        )
+                        request_kwargs=_req_kw,
+                        raise_for_status=True,
+                    )
+                    data = download.data
+                    ct = download.content_type or "image/png"
+                    fname = (
+                        image_url.rsplit("/", 1)[-1].split("?")[0] or "image.png"
+                    )
             except ImportError:
                 import httpx
                 _httpx_kw: dict = {}
                 if self._proxy_url:
                     _httpx_kw["proxy"] = self._proxy_url
                 async with httpx.AsyncClient(**_httpx_kw) as http:
-                    resp = await http.get(image_url, follow_redirects=True, timeout=30)
-                    resp.raise_for_status()
-                    data = resp.content
-                    ct = resp.headers.get("content-type", "image/png")
+                    download = await read_httpx_url_bytes_with_safe_redirects(
+                        http,
+                        image_url,
+                        timeout=30,
+                    )
+                    data = download.data
+                    ct = download.headers.get("content-type", "image/png")
                     fname = image_url.rsplit("/", 1)[-1].split("?")[0] or "image.png"
         except Exception as exc:
             logger.warning("Matrix: failed to download image %s: %s", image_url, exc)

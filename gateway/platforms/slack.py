@@ -47,6 +47,7 @@ from gateway.platforms.base import (
     resolve_proxy_url,
     safe_url_for_log,
     cache_document_from_bytes,
+    read_httpx_url_bytes_with_safe_redirects,
 )
 
 
@@ -1079,7 +1080,7 @@ class SlackAdapter(BasePlatformAdapter):
             file_uploads: List[Dict[str, Any]] = []
             initial_comment_parts: List[str] = []
             try:
-                async with _httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
+                async with _httpx.AsyncClient(timeout=30.0) as http_client:
                     for image_url, alt_text in chunk:
                         if alt_text:
                             initial_comment_parts.append(alt_text)
@@ -1098,10 +1099,17 @@ class SlackAdapter(BasePlatformAdapter):
                                 logger.warning("[Slack] Blocked unsafe image URL in batch")
                                 continue
                             try:
-                                response = await http_client.get(image_url)
-                                response.raise_for_status()
+                                download = await read_httpx_url_bytes_with_safe_redirects(
+                                    http_client,
+                                    image_url,
+                                    headers={
+                                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+                                        "Accept": "image/*,*/*;q=0.8",
+                                    },
+                                    timeout=30.0,
+                                )
                                 ext = "png"
-                                ct = response.headers.get("content-type", "")
+                                ct = download.headers.get("content-type", "")
                                 if "jpeg" in ct or "jpg" in ct:
                                     ext = "jpg"
                                 elif "gif" in ct:
@@ -1109,7 +1117,7 @@ class SlackAdapter(BasePlatformAdapter):
                                 elif "webp" in ct:
                                     ext = "webp"
                                 file_uploads.append({
-                                    "content": response.content,
+                                    "content": download.data,
                                     "filename": f"image_{len(file_uploads)}.{ext}",
                                 })
                             except Exception as dl_err:
@@ -1429,26 +1437,22 @@ class SlackAdapter(BasePlatformAdapter):
         try:
             import httpx
 
-            async def _ssrf_redirect_guard(response):
-                """Re-check redirect targets so public URLs cannot bounce into private IPs."""
-                if response.is_redirect and response.next_request:
-                    redirect_url = str(response.next_request.url)
-                    if not is_safe_url(redirect_url):
-                        raise ValueError("Blocked redirect to private/internal address")
-
             # Download the image first
-            async with httpx.AsyncClient(
-                timeout=30.0,
-                follow_redirects=True,
-                event_hooks={"response": [_ssrf_redirect_guard]},
-            ) as client:
-                response = await client.get(image_url)
-                response.raise_for_status()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                download = await read_httpx_url_bytes_with_safe_redirects(
+                    client,
+                    image_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+                        "Accept": "image/*,*/*;q=0.8",
+                    },
+                    timeout=30.0,
+                )
 
             thread_ts = self._resolve_thread_ts(reply_to, metadata)
             result = await self._get_client(chat_id).files_upload_v2(
                 channel=chat_id,
-                content=response.content,
+                content=download.data,
                 filename="image.png",
                 initial_comment=caption or "",
                 thread_ts=thread_ts,
@@ -2893,20 +2897,21 @@ class SlackAdapter(BasePlatformAdapter):
 
         bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             for attempt in range(3):
                 try:
-                    response = await client.get(
+                    download = await read_httpx_url_bytes_with_safe_redirects(
+                        client,
                         url,
                         headers={"Authorization": f"Bearer {bot_token}"},
+                        timeout=30.0,
                     )
-                    response.raise_for_status()
 
                     # Slack may return an HTML sign-in/redirect page
                     # instead of actual media bytes (e.g. expired token,
                     # restricted file access).  Detect this early so we
                     # don't cache bogus data and confuse downstream tools.
-                    ct = response.headers.get("content-type", "")
+                    ct = download.headers.get("content-type", "")
                     if "text/html" in ct:
                         raise ValueError(
                             "Slack returned HTML instead of media "
@@ -2916,10 +2921,10 @@ class SlackAdapter(BasePlatformAdapter):
 
                     if audio:
                         from gateway.platforms.base import cache_audio_from_bytes
-                        return cache_audio_from_bytes(response.content, ext)
+                        return cache_audio_from_bytes(download.data, ext)
                     else:
                         from gateway.platforms.base import cache_image_from_bytes
-                        return cache_image_from_bytes(response.content, ext)
+                        return cache_image_from_bytes(download.data, ext)
                 except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
                     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
                         raise
@@ -2936,22 +2941,23 @@ class SlackAdapter(BasePlatformAdapter):
 
         bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             for attempt in range(3):
                 try:
-                    response = await client.get(
+                    download = await read_httpx_url_bytes_with_safe_redirects(
+                        client,
                         url,
                         headers={"Authorization": f"Bearer {bot_token}"},
+                        timeout=30.0,
                     )
-                    response.raise_for_status()
-                    ct = response.headers.get("content-type", "")
+                    ct = download.headers.get("content-type", "")
                     if "text/html" in ct:
                         raise ValueError(
                             "Slack returned HTML instead of file bytes "
                             f"(content-type: {ct}); "
                             "check bot token scopes and file permissions"
                         )
-                    return response.content
+                    return download.data
                 except (httpx.TimeoutException, httpx.HTTPStatusError, ValueError) as exc:
                     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
                         raise

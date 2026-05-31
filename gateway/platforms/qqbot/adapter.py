@@ -69,6 +69,7 @@ from gateway.platforms.base import (
     _ssrf_redirect_guard,
     cache_document_from_bytes,
     cache_image_from_bytes,
+    read_httpx_url_bytes_with_safe_redirects,
 )
 from gateway.platforms.helpers import strip_markdown
 
@@ -1782,13 +1783,13 @@ class QQAdapter(BasePlatformAdapter):
             return None
 
         try:
-            resp = await self._http_client.get(
+            download = await read_httpx_url_bytes_with_safe_redirects(
+                self._http_client,
                 url,
                 timeout=30.0,
                 headers=self._qq_media_headers(),
             )
-            resp.raise_for_status()
-            data = resp.content
+            data = download.data
         except Exception as exc:
             logger.debug(
                 "[%s] Download failed for %s: %s", self._log_tag, url[:80], exc
@@ -1897,19 +1898,18 @@ class QQAdapter(BasePlatformAdapter):
                 is_pre_wav,
                 bool(download_headers),
             )
-            resp = await self._http_client.get(
+            download = await read_httpx_url_bytes_with_safe_redirects(
+                self._http_client,
                 download_url,
                 timeout=30.0,
                 headers=download_headers,
-                follow_redirects=True,
             )
-            resp.raise_for_status()
-            audio_data = resp.content
+            audio_data = download.data
             logger.debug(
                 "[%s] STT: downloaded %d bytes, content_type=%s",
                 self._log_tag,
                 len(audio_data),
-                resp.headers.get("content-type", "unknown"),
+                download.headers.get("content-type", "unknown"),
             )
 
             if len(audio_data) < 10:

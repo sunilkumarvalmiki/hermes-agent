@@ -139,6 +139,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_bytes,
     cache_image_from_bytes,
+    read_httpx_url_bytes_with_safe_redirects,
 )
 from gateway.status import acquire_scoped_lock, release_scoped_lock
 from hermes_constants import get_hermes_home
@@ -3215,20 +3216,21 @@ class FeishuAdapter(BasePlatformAdapter):
 
         import httpx
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            download = await read_httpx_url_bytes_with_safe_redirects(
+                client,
                 file_url,
                 headers={
                     "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
                     "Accept": "*/*",
                 },
+                timeout=30.0,
             )
-            response.raise_for_status()
             # Snapshot Content-Type and body while the client context is
             # still active so pooled connections fully release on exit.
             # See #18451.
-            content_type_hdr = str(response.headers.get("Content-Type", ""))
-            body = response.content
+            content_type_hdr = str(download.headers.get("content-type", ""))
+            body = download.data
         filename = self._derive_remote_filename(
             file_url,
             content_type=content_type_hdr,

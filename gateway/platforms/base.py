@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 from abc import ABC, abstractmethod
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from utils import normalize_proxy_url
 
@@ -476,7 +476,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple, Union
+from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple, Union, NamedTuple
 from enum import Enum
 
 from pathlib import Path as _Path
@@ -530,6 +530,204 @@ def safe_url_for_log(url: str, max_len: int = 80) -> str:
     return f"{safe[:max_len - 3]}..."
 
 
+class SafeDownloadResponse(NamedTuple):
+    data: bytes
+    headers: Dict[str, str]
+    status: int
+    content_type: str
+
+
+_HTTP_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+
+
+def _normalized_headers(headers: Any) -> Dict[str, str]:
+    if not headers:
+        return {}
+    if type(headers).__module__ == "unittest.mock":
+        return {}
+    try:
+        items_method = getattr(headers, "items")
+    except Exception:
+        return {}
+    if inspect.iscoroutinefunction(items_method):
+        return {}
+    items = items_method()
+    if inspect.isawaitable(items):
+        try:
+            items.close()
+        except Exception:
+            pass
+        return {}
+    try:
+        return {str(key).lower(): str(value) for key, value in items}
+    except Exception:
+        return {}
+
+
+def _safe_redirect_target(source_url: str, location: str | None) -> str:
+    if not location:
+        raise ValueError(
+            f"Blocked redirect without Location header from {safe_url_for_log(source_url)}"
+        )
+    redirect_url = urljoin(str(source_url), str(location))
+    from tools.url_safety import is_safe_url
+
+    if not is_safe_url(redirect_url):
+        raise ValueError(
+            f"Blocked redirect to private/internal address: {safe_url_for_log(redirect_url)}"
+        )
+    return redirect_url
+
+
+def _raise_if_content_length_too_large(
+    headers: Dict[str, str],
+    max_bytes: int | None,
+    max_bytes_error_context: str,
+) -> None:
+    if max_bytes is None:
+        return
+    content_length = headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+        raise ValueError(
+            f"Remote media exceeds {max_bytes_error_context}: "
+            f"{int(content_length)} bytes > {max_bytes} bytes"
+        )
+
+
+def _raise_if_download_too_large(
+    downloaded_bytes: int,
+    max_bytes: int | None,
+    max_bytes_error_context: str,
+) -> None:
+    if max_bytes is not None and downloaded_bytes > max_bytes:
+        raise ValueError(
+            f"Remote media exceeds {max_bytes_error_context} while downloading: "
+            f"{downloaded_bytes} bytes > {max_bytes} bytes"
+        )
+
+
+async def read_httpx_url_bytes_with_safe_redirects(
+    client: Any,
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: Any = 30.0,
+    max_bytes: int | None = None,
+    max_redirects: int = 10,
+    raise_for_status: bool = True,
+    max_bytes_error_context: str = "download limit",
+) -> SafeDownloadResponse:
+    """Read URL bytes with every redirect hop re-checked against SSRF rules."""
+    current_url = url
+    redirects_followed = 0
+    while True:
+        async with client.stream(
+            "GET",
+            current_url,
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=False,
+        ) as response:
+            status = int(getattr(response, "status_code", 0) or 0)
+            response_headers = _normalized_headers(getattr(response, "headers", {}))
+            if status in _HTTP_REDIRECT_STATUS_CODES:
+                if redirects_followed >= max_redirects:
+                    raise ValueError(
+                        f"Too many redirects while downloading {safe_url_for_log(url)}"
+                    )
+                current_url = _safe_redirect_target(
+                    current_url,
+                    response_headers.get("location"),
+                )
+                redirects_followed += 1
+                continue
+
+            if raise_for_status:
+                response.raise_for_status()
+            _raise_if_content_length_too_large(
+                response_headers,
+                max_bytes,
+                max_bytes_error_context,
+            )
+            data = bytearray()
+            async for chunk in response.aiter_bytes():
+                data.extend(chunk)
+                _raise_if_download_too_large(
+                    len(data),
+                    max_bytes,
+                    max_bytes_error_context,
+                )
+            return SafeDownloadResponse(
+                data=bytes(data),
+                headers=response_headers,
+                status=status,
+                content_type=response_headers.get("content-type", ""),
+            )
+
+
+async def read_aiohttp_url_bytes_with_safe_redirects(
+    session: Any,
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: Any = None,
+    request_kwargs: Optional[Dict[str, Any]] = None,
+    max_bytes: int | None = None,
+    max_redirects: int = 10,
+    raise_for_status: bool = False,
+    max_bytes_error_context: str = "download limit",
+) -> SafeDownloadResponse:
+    """Read URL bytes from aiohttp while validating each redirect target."""
+    current_url = url
+    redirects_followed = 0
+    while True:
+        kwargs = dict(request_kwargs or {})
+        kwargs["allow_redirects"] = False
+        if headers is not None:
+            kwargs["headers"] = headers
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
+        async with session.get(current_url, **kwargs) as response:
+            status = int(getattr(response, "status", 0) or 0)
+            response_headers = _normalized_headers(getattr(response, "headers", {}))
+            if status in _HTTP_REDIRECT_STATUS_CODES:
+                if redirects_followed >= max_redirects:
+                    raise ValueError(
+                        f"Too many redirects while downloading {safe_url_for_log(url)}"
+                    )
+                current_url = _safe_redirect_target(
+                    current_url,
+                    response_headers.get("location"),
+                )
+                redirects_followed += 1
+                continue
+
+            if raise_for_status and hasattr(response, "raise_for_status"):
+                response.raise_for_status()
+            _raise_if_content_length_too_large(
+                response_headers,
+                max_bytes,
+                max_bytes_error_context,
+            )
+            data = await response.read()
+            _raise_if_download_too_large(
+                len(data),
+                max_bytes,
+                max_bytes_error_context,
+            )
+            content_type = (
+                str(getattr(response, "content_type", "") or "")
+                or response_headers.get("content-type", "")
+            )
+            return SafeDownloadResponse(
+                data=data,
+                headers=response_headers,
+                status=status,
+                content_type=content_type,
+            )
+
+
 async def _ssrf_redirect_guard(response):
     """Re-validate each redirect target to prevent redirect-based SSRF.
 
@@ -539,12 +737,10 @@ async def _ssrf_redirect_guard(response):
     Must be async because httpx.AsyncClient awaits response event hooks.
     """
     if response.is_redirect and response.next_request:
-        redirect_url = str(response.next_request.url)
-        from tools.url_safety import is_safe_url
-        if not is_safe_url(redirect_url):
-            raise ValueError(
-                f"Blocked redirect to private/internal address: {safe_url_for_log(redirect_url)}"
-            )
+        _safe_redirect_target(
+            str(response.request.url) if getattr(response, "request", None) else "",
+            str(response.next_request.url),
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,92 @@ class TestSafeUrlForLog:
         assert safe_url_for_log(url, max_len=0) == ""
 
 
+class _FakeAsyncContext:
+    def __init__(self, response):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
+class TestSafeRedirectDownloads:
+    @pytest.mark.asyncio
+    async def test_httpx_download_blocks_redirect_to_loopback(self, monkeypatch):
+        from gateway.platforms.base import read_httpx_url_bytes_with_safe_redirects
+
+        class FakeResponse:
+            status_code = 302
+            headers = {"location": "http://127.0.0.1/admin"}
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self):
+                yield b"redirect body"
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def stream(self, method, url, **kwargs):
+                self.calls.append((method, url, kwargs))
+                return _FakeAsyncContext(FakeResponse())
+
+        monkeypatch.setattr(
+            "tools.url_safety.is_safe_url",
+            lambda url: not str(url).startswith("http://127.0.0.1"),
+        )
+        client = FakeClient()
+
+        with pytest.raises(ValueError, match="Blocked redirect"):
+            await read_httpx_url_bytes_with_safe_redirects(
+                client,
+                "https://public.example/media.png",
+            )
+
+        assert client.calls[0][2]["follow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_aiohttp_download_blocks_redirect_to_loopback(self, monkeypatch):
+        from gateway.platforms.base import read_aiohttp_url_bytes_with_safe_redirects
+
+        class FakeResponse:
+            status = 302
+            headers = {"Location": "http://127.0.0.1/admin"}
+            content_type = "text/html"
+
+            def raise_for_status(self):
+                return None
+
+            async def read(self):
+                return b"redirect body"
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return _FakeAsyncContext(FakeResponse())
+
+        monkeypatch.setattr(
+            "tools.url_safety.is_safe_url",
+            lambda url: not str(url).startswith("http://127.0.0.1"),
+        )
+        session = FakeSession()
+
+        with pytest.raises(ValueError, match="Blocked redirect"):
+            await read_aiohttp_url_bytes_with_safe_redirects(
+                session,
+                "https://public.example/media.png",
+            )
+
+        assert session.calls[0][1]["allow_redirects"] is False
+
+
 # ---------------------------------------------------------------------------
 # MessageEvent — command parsing
 # ---------------------------------------------------------------------------

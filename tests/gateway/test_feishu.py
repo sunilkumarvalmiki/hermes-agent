@@ -1803,24 +1803,31 @@ class TestAdapterBehavior(unittest.TestCase):
     def test_download_remote_document_reads_response_before_httpx_client_closes(self):
         """#18451 — snapshot Content-Type + body while the httpx.AsyncClient
         context is still active so pooled connections fully release on
-        exit.  Otherwise the response is only readable because httpx
-        eagerly buffers it; a future refactor to .stream() would silently
-        read-after-close."""
+        exit.  The downloader uses httpx.stream(), so this guards against
+        accidentally reading response bytes after the stream/client closes."""
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
         events: list[str] = []
 
         class _FakeResponse:
+            status_code = 200
             headers = {"Content-Type": "application/octet-stream"}
 
             def raise_for_status(self) -> None:
                 events.append("raise_for_status")
 
-            @property
-            def content(self) -> bytes:
+            async def aiter_bytes(self):
                 events.append("content_read")
-                return b"doc-bytes"
+                yield b"doc-bytes"
+
+        class _FakeStream:
+            async def __aenter__(self) -> _FakeResponse:
+                events.append("stream_enter")
+                return _FakeResponse()
+
+            async def __aexit__(self, *exc: object) -> None:
+                events.append("stream_exit")
 
         class _FakeAsyncClient:
             def __init__(self, *_a: object, **_k: object) -> None:
@@ -1833,9 +1840,9 @@ class TestAdapterBehavior(unittest.TestCase):
             async def __aexit__(self, *exc: object) -> None:
                 events.append("client_exit")
 
-            async def get(self, *_a: object, **_k: object) -> _FakeResponse:
-                events.append("get")
-                return _FakeResponse()
+            def stream(self, *_a: object, **_k: object) -> _FakeStream:
+                events.append("stream")
+                return _FakeStream()
 
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
