@@ -3394,13 +3394,16 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
     """
     if getattr(app.state, "auth_required", False):
         return True
-    # Any explicit non-loopback bind (0.0.0.0, ::, or a specific LAN /
-    # Tailscale address) means the operator opted into non-loopback
-    # access via --insecure.  The loopback-only peer gate only applies to
-    # an actual loopback bind; otherwise the WS handshake is rejected even
-    # though same-bind HTTP requests pass _is_accepted_host.
+    # Any explicit non-loopback listen bind (0.0.0.0, ::, or a specific LAN /
+    # Tailscale address) means the loopback-only peer gate cannot be applied
+    # reliably. Docker loopback port publication, for example, may present a
+    # bridge peer address to the container even though the browser-facing host
+    # remains 127.0.0.1.
     bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
-    if bound_host and bound_host not in _LOOPBACK_HOSTS:
+    listen_host = (
+        getattr(app.state, "listen_host", None) or bound_host
+    ).strip().lower()
+    if listen_host and listen_host not in _LOOPBACK_HOSTS:
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:
@@ -4855,18 +4858,25 @@ def start_server(
     allow_public: bool = False,
     *,
     embedded_chat: bool = False,
+    host_header_host: Optional[str] = None,
 ):
     """Start the web UI server."""
     import uvicorn
 
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
+    host_policy_host = (host_header_host or host).strip() or host
+    target_description = (
+        f"{host} (Host-header policy: {host_policy_host})"
+        if host_policy_host != host
+        else host
+    )
 
     # Phase 0: stash the auth-gate flag on app.state so middleware / SPA-token
     # injection / WS-auth paths can branch on it consistently.  Phase 3.5
     # uses this to decide whether to refuse the bind, log the gate-on
     # banner, and enable uvicorn proxy_headers.
-    app.state.auth_required = should_require_auth(host, allow_public)
+    app.state.auth_required = should_require_auth(host_policy_host, allow_public)
 
     if app.state.auth_required:
         # Phase 3.5: the gate engages on non-loopback binds.  The legacy
@@ -4893,7 +4903,7 @@ def start_server(
 
             if skip_reasons:
                 raise SystemExit(
-                    f"Refusing to bind dashboard to {host} — the OAuth auth "
+                    f"Refusing to bind dashboard to {target_description} — the OAuth auth "
                     f"gate engages on non-loopback binds, but no auth "
                     f"providers are registered.\n"
                     f"\n"
@@ -4905,7 +4915,7 @@ def start_server(
                     f"recommended on untrusted networks)."
                 )
             raise SystemExit(
-                f"Refusing to bind dashboard to {host} — the OAuth auth "
+                f"Refusing to bind dashboard to {target_description} — the OAuth auth "
                 f"gate engages on non-loopback binds, but no auth providers "
                 f"are registered and no bundled plugin reported a reason "
                 f"(was the dashboard_auth/nous plugin removed?).\n"
@@ -4916,7 +4926,7 @@ def start_server(
         _log.info(
             "Dashboard binding to %s with OAuth auth gate enabled. "
             "Providers: %s",
-            host,
+            target_description,
             ", ".join(p.name for p in list_providers()),
         )
     elif host not in _LOOPBACK_HOST_VALUES and allow_public:
@@ -4925,13 +4935,25 @@ def start_server(
             "Binding to %s with --insecure — the dashboard has no robust "
             "authentication. Only use on trusted networks.", host,
         )
+    elif host_policy_host != host:
+        _log.info(
+            "Dashboard listening on %s while validating Host headers as %s. "
+            "Use this only behind loopback-only port publication.",
+            host,
+            host_policy_host,
+        )
 
-    # Record the bound host so host_header_middleware can validate incoming
-    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
+    # Record the browser-facing host so host_header_middleware can validate
+    # incoming Host headers against it. Defends against DNS rebinding
+    # (GHSA-ppp5-vxwm-4cf7).
     # bound_port is also stashed so /api/pty can build the back-WS URL the
     # PTY child uses to publish events to the dashboard sidebar.
-    app.state.bound_host = host
+    app.state.bound_host = host_policy_host
+    app.state.listen_host = host
     app.state.bound_port = port
+    browser_host = (
+        host_policy_host if host_policy_host not in {"0.0.0.0", "::"} else host
+    )
 
     if open_browser:
         import webbrowser
@@ -4953,7 +4975,7 @@ def start_server(
             def _open():
                 try:
                     time.sleep(1.0)
-                    webbrowser.open(f"http://{host}:{port}")
+                    webbrowser.open(f"http://{browser_host}:{port}")
                 except Exception:
                     pass
 
@@ -4964,7 +4986,7 @@ def start_server(
                 "(headless Linux). Pass --no-open to suppress this detection."
             )
 
-    print(f"  Hermes Web UI → http://{host}:{port}")
+    print(f"  Hermes Web UI → http://{browser_host}:{port}")
     # proxy_headers defaults to False so _ws_client_is_allowed sees the real
     # connection peer rather than X-Forwarded-For's rewritten value (which
     # would defeat the loopback gate when behind a reverse proxy).  When the

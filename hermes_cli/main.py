@@ -11102,6 +11102,7 @@ def cmd_dashboard(args):
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         embedded_chat=embedded_chat,
+        host_header_host=getattr(args, "host_header_host", None),
     )
 
 
@@ -14330,6 +14331,14 @@ Examples:
     )
     dashboard_parser.add_argument(
         "--host", default="127.0.0.1", help="Host (default 127.0.0.1)"
+    )
+    dashboard_parser.add_argument(
+        "--host-header-host",
+        default=None,
+        help=(
+            "Browser-facing Host header to validate when the listen host differs "
+            "from the published host, such as Docker loopback port publishing"
+        ),
     )
     dashboard_parser.add_argument(
         "--no-open", action="store_true", help="Don't open browser automatically"

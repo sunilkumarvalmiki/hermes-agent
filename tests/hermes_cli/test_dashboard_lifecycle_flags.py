@@ -22,6 +22,7 @@ def _ns(**kw):
     """Build an argparse.Namespace with dashboard defaults plus overrides."""
     defaults = dict(
         port=9119, host="127.0.0.1", no_open=False, insecure=False,
+        host_header_host=None,
         tui=False, stop=False, status=False,
     )
     defaults.update(kw)
@@ -179,3 +180,27 @@ class TestArgparseWiring:
              pytest.raises(SystemExit) as exc:
             mod.cmd_dashboard(_ns(status=True))
         assert exc.value.code == 0
+
+
+class TestDashboardStartWiring:
+    def test_start_passes_host_header_host_to_server(self):
+        called = {}
+
+        def fake_start_server(**kw):
+            called.update(kw)
+
+        fake_ws = MagicMock()
+        fake_ws.start_server = fake_start_server
+
+        with patch("hermes_cli.main._build_web_ui", return_value=True), \
+             patch("hermes_cli.plugins.discover_plugins", lambda: None), \
+             patch.dict(sys.modules, {"hermes_cli.web_server": fake_ws}):
+            cmd_dashboard(_ns(
+                host="0.0.0.0",
+                host_header_host="127.0.0.1",
+                no_open=True,
+            ))
+
+        assert called["host"] == "0.0.0.0"
+        assert called["host_header_host"] == "127.0.0.1"
+        assert called["open_browser"] is False

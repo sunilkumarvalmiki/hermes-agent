@@ -4,6 +4,7 @@ Phase 0 — establish a baseline pin on the current (pre-OAuth) behavior so
 later phases can prove they didn't break loopback mode.
 """
 import pytest
+from types import SimpleNamespace
 
 # Phase 5 / Phase 6: these tests mutate ``web_server.app.state.auth_required``
 # at module level. Run them in the same xdist worker so they don't race
@@ -257,3 +258,33 @@ def test_start_server_insecure_keeps_proxy_headers_off(monkeypatch):
     )
     assert web_server.app.state.auth_required is False
     assert captured["kwargs"].get("proxy_headers") is False
+
+
+def test_start_server_host_header_host_preserves_loopback_policy_for_docker_publish(monkeypatch):
+    """Docker can listen on all interfaces inside the container while the
+    browser-facing Host policy remains loopback-scoped."""
+    captured = _stub_uvicorn_run(monkeypatch)
+    web_server.app.state.auth_required = None
+    web_server.app.state.bound_host = None
+    web_server.start_server(
+        host="0.0.0.0",
+        host_header_host="127.0.0.1",
+        port=9119,
+        open_browser=False,
+        allow_public=False,
+    )
+    assert web_server.app.state.auth_required is False
+    assert web_server.app.state.bound_host == "127.0.0.1"
+    assert web_server.app.state.listen_host == "0.0.0.0"
+    assert captured["kwargs"].get("host") == "0.0.0.0"
+    assert captured["kwargs"].get("proxy_headers") is False
+
+
+def test_ws_peer_gate_uses_listen_host_for_docker_loopback_publish(monkeypatch):
+    """Docker loopback port publication may present a bridge peer address."""
+    monkeypatch.setattr(web_server.app.state, "auth_required", False, raising=False)
+    monkeypatch.setattr(web_server.app.state, "bound_host", "127.0.0.1", raising=False)
+    monkeypatch.setattr(web_server.app.state, "listen_host", "0.0.0.0", raising=False)
+    fake_ws = SimpleNamespace(client=SimpleNamespace(host="172.17.0.1"))
+
+    assert web_server._ws_client_is_allowed(fake_ws) is True
