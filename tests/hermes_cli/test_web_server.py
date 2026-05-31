@@ -2,6 +2,7 @@
 
 import os
 import json
+import sys
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -11,6 +12,14 @@ from hermes_cli.config import (
     redact_key,
     OPTIONAL_ENV_VARS,
 )
+
+
+def _assert_dashboard_anti_framing_headers(resp):
+    assert resp.headers.get("x-frame-options") == "DENY"
+    assert "frame-ancestors 'none'" in resp.headers.get(
+        "content-security-policy",
+        "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +121,11 @@ class TestWebServerEndpoints:
 
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+
+    def test_dashboard_html_disallows_framing(self):
+        resp = self.client.get("/")
+        assert resp.status_code == 200
+        _assert_dashboard_anti_framing_headers(resp)
 
     def test_get_status(self):
         resp = self.client.get("/api/status")
@@ -686,9 +700,14 @@ class TestNewEndpoints:
         )
 
         assert resp.status_code == 200
-        wrapper_path = wrapper_dir / "writer"
-        assert wrapper_path.exists()
-        assert wrapper_path.read_text() == '#!/bin/sh\nexec hermes -p writer "$@"\n'
+        if sys.platform == "win32":
+            wrapper_path = wrapper_dir / "writer.bat"
+            assert wrapper_path.exists()
+            assert wrapper_path.read_text() == "@echo off\nhermes -p writer %*\n"
+        else:
+            wrapper_path = wrapper_dir / "writer"
+            assert wrapper_path.exists()
+            assert wrapper_path.read_text() == '#!/bin/sh\nexec hermes -p writer "$@"\n'
 
     def test_profiles_create_with_clone_from_default_copies_default_skills(self, monkeypatch):
         from hermes_constants import get_hermes_home
@@ -2514,6 +2533,11 @@ class TestDashboardPluginStaticAssetAllowlist:
         # And the body is actually the manifest, not the SPA fallback.
         body = resp.json()
         assert body.get("name") == "example"
+
+    def test_manifest_json_disallows_framing(self):
+        resp = self.client.get("/dashboard-plugins/example/manifest.json")
+        assert resp.status_code == 200
+        _assert_dashboard_anti_framing_headers(resp)
 
     def test_unknown_plugin_is_404(self):
         """Existing behaviour preserved: nonexistent plugin name → 404."""

@@ -288,6 +288,25 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_DASHBOARD_ANTI_FRAMING_HEADERS = {
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "X-Frame-Options": "DENY",
+}
+
+
+def _add_dashboard_anti_framing_headers(response: Response) -> Response:
+    for name, value in _DASHBOARD_ANTI_FRAMING_HEADERS.items():
+        if name not in response.headers:
+            response.headers[name] = value
+    return response
+
+
+@app.middleware("http")
+async def dashboard_anti_framing_middleware(request: Request, call_next):
+    response = await call_next(request)
+    return _add_dashboard_anti_framing_headers(response)
+
+
 # ---------------------------------------------------------------------------
 # Config schema — auto-generated from DEFAULT_CONFIG
 # ---------------------------------------------------------------------------
