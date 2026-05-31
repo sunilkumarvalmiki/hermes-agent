@@ -621,13 +621,62 @@ async def read_httpx_url_bytes_with_safe_redirects(
     current_url = url
     redirects_followed = 0
     while True:
-        async with client.stream(
+        stream_context = client.stream(
             "GET",
             current_url,
             headers=headers,
             timeout=timeout,
             follow_redirects=False,
-        ) as response:
+        )
+        if inspect.isawaitable(stream_context):
+            try:
+                stream_context.close()
+            except Exception:
+                pass
+            response = await client.get(
+                current_url,
+                headers=headers,
+                timeout=timeout,
+                follow_redirects=False,
+            )
+            status = int(getattr(response, "status_code", 0) or 0)
+            response_headers = _normalized_headers(getattr(response, "headers", {}))
+            if status in _HTTP_REDIRECT_STATUS_CODES:
+                if redirects_followed >= max_redirects:
+                    raise ValueError(
+                        f"Too many redirects while downloading {safe_url_for_log(url)}"
+                    )
+                current_url = _safe_redirect_target(
+                    current_url,
+                    response_headers.get("location"),
+                )
+                redirects_followed += 1
+                continue
+
+            if raise_for_status:
+                response.raise_for_status()
+            _raise_if_content_length_too_large(
+                response_headers,
+                max_bytes,
+                max_bytes_error_context,
+            )
+            data = getattr(response, "content", b"")
+            if inspect.isawaitable(data):
+                data = await data
+            data = bytes(data or b"")
+            _raise_if_download_too_large(
+                len(data),
+                max_bytes,
+                max_bytes_error_context,
+            )
+            return SafeDownloadResponse(
+                data=data,
+                headers=response_headers,
+                status=status,
+                content_type=response_headers.get("content-type", ""),
+            )
+
+        async with stream_context as response:
             status = int(getattr(response, "status_code", 0) or 0)
             response_headers = _normalized_headers(getattr(response, "headers", {}))
             if status in _HTTP_REDIRECT_STATUS_CODES:
