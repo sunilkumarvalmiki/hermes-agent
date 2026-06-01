@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath
 from hermes_constants import get_hermes_home
 from agent.skill_utils import is_excluded_skill_path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import quote, urljoin, urlparse, urlunparse
 
 import httpx
 import yaml
@@ -61,6 +61,7 @@ INDEX_CACHE_TTL = 3600  # 1 hour
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 _MAX_SKILL_FETCH_REDIRECTS = 5
 _MAX_SKILL_FETCH_BYTES = 10 * 1024 * 1024
+_GIT_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +91,25 @@ class SkillBundle:
     identifier: str
     trust_level: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GitHubRepoHead:
+    default_branch: str
+    commit_sha: str
+
+
+@dataclass(frozen=True)
+class GitHubTreeSnapshot:
+    default_branch: str
+    commit_sha: str
+    tree_entries: List[dict]
+
+
+@dataclass(frozen=True)
+class GitHubDirectoryDownload:
+    files: Dict[str, Union[str, bytes]]
+    provenance: Dict[str, str]
 
 
 def _normalize_bundle_path(path_value: str, *, field_name: str, allow_nested: bool) -> str:
@@ -455,9 +475,11 @@ class GitHubSource(SkillSource):
         self.taps = list(self.DEFAULT_TAPS)
         if extra_taps:
             self.taps.extend(extra_taps)
-        # Per-instance cache: repo -> (default_branch, tree_entries)
+        # Per-instance caches keep a single immutable GitHub snapshot per repo
+        # within a search/install flow.
         # Survives within a single search/install flow, avoiding redundant API calls.
-        self._tree_cache: Dict[str, Tuple[str, List[dict]]] = {}
+        self._head_cache: Dict[str, GitHubRepoHead] = {}
+        self._tree_cache: Dict[str, GitHubTreeSnapshot] = {}
         # Per-repo cache of the optional skills.sh.json grouping sidecar,
         # mapping skill_name -> human-readable grouping title. ``None`` means
         # "fetched, no sidecar"; a missing key means "not fetched yet".
@@ -524,8 +546,8 @@ class GitHubSource(SkillSource):
         repo = f"{parts[0]}/{parts[1]}"
         skill_path = parts[2]
 
-        files = self._download_directory(repo, skill_path)
-        if not files or "SKILL.md" not in files:
+        download = self._download_directory_with_provenance(repo, skill_path)
+        if not download or not download.files or "SKILL.md" not in download.files:
             return None
 
         skill_name = skill_path.rstrip("/").split("/")[-1]
@@ -533,10 +555,11 @@ class GitHubSource(SkillSource):
 
         return SkillBundle(
             name=skill_name,
-            files=files,
+            files=download.files,
             source="github",
             identifier=identifier,
             trust_level=trust,
+            metadata={"source_provenance": download.provenance},
         )
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
@@ -625,23 +648,13 @@ class GitHubSource(SkillSource):
 
     # -- Repo tree cache (avoids redundant API calls) --
 
-    def _get_repo_tree(self, repo: str) -> Optional[Tuple[str, List[dict]]]:
-        """Get cached or fresh repo tree.
-
-        Returns ``(default_branch, tree_entries)`` or ``None``.
-        A single install can call ``_download_directory_via_tree`` and
-        ``_find_skill_in_repo_tree`` multiple times for the same repo — this
-        cache eliminates the redundant ``GET /repos/{repo}`` +
-        ``GET /repos/{repo}/git/trees/{branch}`` round-trips (previously up to
-        6 duplicated pairs per install, consuming ~12 of the 60/hr
-        unauthenticated rate limit for nothing).
-        """
-        if repo in self._tree_cache:
-            return self._tree_cache[repo]
+    def _resolve_repo_head(self, repo: str) -> Optional[GitHubRepoHead]:
+        """Resolve a repository's default branch to an immutable commit SHA."""
+        if repo in self._head_cache:
+            return self._head_cache[repo]
 
         headers = self.auth.get_headers()
 
-        # Resolve default branch
         try:
             resp = httpx.get(
                 f"https://api.github.com/repos/{repo}",
@@ -650,14 +663,58 @@ class GitHubSource(SkillSource):
             if resp.status_code != 200:
                 self._check_rate_limit_response(resp)
                 return None
-            default_branch = resp.json().get("default_branch", "main")
+            default_branch = str(resp.json().get("default_branch", "main")).strip()
+            if not default_branch:
+                return None
         except (httpx.HTTPError, ValueError):
             return None
 
-        # Fetch recursive tree
+        try:
+            ref_path = quote(default_branch, safe="/")
+            resp = httpx.get(
+                f"https://api.github.com/repos/{repo}/git/ref/heads/{ref_path}",
+                headers=headers, timeout=15, follow_redirects=True,
+            )
+            if resp.status_code != 200:
+                self._check_rate_limit_response(resp)
+                return None
+            ref_data = resp.json()
+            obj = ref_data.get("object", {}) if isinstance(ref_data, dict) else {}
+            commit_sha = str(obj.get("sha", "")).lower()
+            if obj.get("type") != "commit" or not _GIT_COMMIT_SHA_RE.fullmatch(commit_sha):
+                return None
+        except (httpx.HTTPError, ValueError):
+            return None
+
+        head = GitHubRepoHead(default_branch=default_branch, commit_sha=commit_sha)
+        self._head_cache[repo] = head
+        return head
+
+    def _get_repo_tree(self, repo: str) -> Optional[GitHubTreeSnapshot]:
+        """Get cached or fresh repo tree.
+
+        Returns a tree snapshot pinned to an immutable commit SHA, or ``None``.
+        A single install can call ``_download_directory_via_tree`` and
+        ``_find_skill_in_repo_tree`` multiple times for the same repo — this
+        cache eliminates the redundant ``GET /repos/{repo}`` +
+        ``GET /repos/{repo}/git/trees/{commit}`` round-trips (previously up to
+        6 duplicated pairs per install, consuming ~12 of the 60/hr
+        unauthenticated rate limit for nothing).
+        """
+        if repo in self._tree_cache:
+            return self._tree_cache[repo]
+
+        head = self._resolve_repo_head(repo)
+        if head is None:
+            return None
+
+        headers = self.auth.get_headers()
+
+        # Fetch recursive tree at the resolved commit. This prevents a branch
+        # move between tree listing and file download from changing the bundle.
         try:
             resp = httpx.get(
-                f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
+                f"https://api.github.com/repos/{repo}/git/trees/{head.commit_sha}",
                 params={"recursive": "1"},
                 headers=headers, timeout=30, follow_redirects=True,
             )
@@ -672,8 +729,15 @@ class GitHubSource(SkillSource):
             return None
 
         entries = tree_data.get("tree", [])
-        self._tree_cache[repo] = (default_branch, entries)
-        return (default_branch, entries)
+        if not isinstance(entries, list):
+            return None
+        snapshot = GitHubTreeSnapshot(
+            default_branch=head.default_branch,
+            commit_sha=head.commit_sha,
+            tree_entries=entries,
+        )
+        self._tree_cache[repo] = snapshot
+        return snapshot
 
     def _check_rate_limit_response(self, resp: "httpx.Response") -> None:
         """Flag the instance as rate-limited when GitHub returns 403 + exhausted quota."""
@@ -694,13 +758,54 @@ class GitHubSource(SkillSource):
         loss.  Falls back to the recursive Contents API when the tree
         endpoint is unavailable or the response is truncated.
         """
-        files = self._download_directory_via_tree(repo, path)
-        if files is not None:
-            return files
-        logger.debug("Tree API unavailable for %s/%s, falling back to Contents API", repo, path)
-        return self._download_directory_recursive(repo, path)
+        download = self._download_directory_with_provenance(repo, path)
+        return download.files if download else {}
 
-    def _download_directory_via_tree(self, repo: str, path: str) -> Optional[Dict[str, str]]:
+    def _download_directory_with_provenance(
+        self, repo: str, path: str,
+    ) -> Optional[GitHubDirectoryDownload]:
+        head = self._resolve_repo_head(repo)
+        if head is None:
+            logger.debug("Could not resolve immutable GitHub commit for %s", repo)
+            return None
+
+        clean_path = path.rstrip("/")
+        base_provenance = {
+            "type": "github",
+            "repo": repo,
+            "path": clean_path,
+            "default_branch": head.default_branch,
+            "commit_sha": head.commit_sha,
+            "immutable_ref": head.commit_sha,
+        }
+
+        tree_snapshot = self._get_repo_tree(repo)
+        files = (
+            self._download_directory_via_tree(
+                repo, clean_path, tree_snapshot=tree_snapshot,
+            )
+            if tree_snapshot
+            else None
+        )
+        if files is not None:
+            return GitHubDirectoryDownload(
+                files=files,
+                provenance={**base_provenance, "fetch_method": "git-tree"},
+            )
+        logger.debug("Tree API unavailable for %s/%s, falling back to Contents API", repo, path)
+        files = self._download_directory_recursive(repo, clean_path, ref=head.commit_sha)
+        return GitHubDirectoryDownload(
+            files=files,
+            provenance={**base_provenance, "fetch_method": "contents-api"},
+        )
+
+    def _download_directory_via_tree(
+        self,
+        repo: str,
+        path: str,
+        *,
+        tree_snapshot: Optional[GitHubTreeSnapshot] = None,
+    ) -> Optional[Dict[str, str]]:
         """Download an entire directory using the Git Trees API (single request).
 
         Returns:
@@ -711,10 +816,10 @@ class GitHubSource(SkillSource):
         """
         path = path.rstrip("/")
 
-        cached = self._get_repo_tree(repo)
-        if cached is None:
+        snapshot = tree_snapshot or self._get_repo_tree(repo)
+        if snapshot is None:
             return None
-        _default_branch, tree_entries = cached
+        tree_entries = snapshot.tree_entries
 
         # Check if ANY entry lives under the target path
         prefix = f"{path}/"
@@ -735,7 +840,7 @@ class GitHubSource(SkillSource):
             if not item_path.startswith(prefix):
                 continue
             rel_path = item_path[len(prefix):]
-            content = self._fetch_file_content(repo, item_path)
+            content = self._fetch_file_content(repo, item_path, ref=snapshot.commit_sha)
             if content is not None:
                 files[rel_path] = content
             else:
@@ -743,11 +848,24 @@ class GitHubSource(SkillSource):
 
         return files if files else None
 
-    def _download_directory_recursive(self, repo: str, path: str) -> Dict[str, str]:
+    def _download_directory_recursive(
+        self,
+        repo: str,
+        path: str,
+        *,
+        ref: Optional[str] = None,
+    ) -> Dict[str, str]:
         """Recursively download via Contents API (fallback)."""
         url = f"https://api.github.com/repos/{repo}/contents/{path.rstrip('/')}"
+        request_kwargs: Dict[str, Any] = {
+            "headers": self.auth.get_headers(),
+            "timeout": 15,
+            "follow_redirects": True,
+        }
+        if ref:
+            request_kwargs["params"] = {"ref": ref}
         try:
-            resp = httpx.get(url, headers=self.auth.get_headers(), timeout=15, follow_redirects=True)
+            resp = httpx.get(url, **request_kwargs)
             if resp.status_code != 200:
                 logger.debug("Contents API returned %d for %s/%s", resp.status_code, repo, path)
                 return {}
@@ -764,12 +882,17 @@ class GitHubSource(SkillSource):
             entry_type = entry.get("type", "")
 
             if entry_type == "file":
-                content = self._fetch_file_content(repo, entry.get("path", ""))
+                if ref:
+                    content = self._fetch_file_content(repo, entry.get("path", ""), ref=ref)
+                else:
+                    content = self._fetch_file_content(repo, entry.get("path", ""))
                 if content is not None:
                     rel_path = name
                     files[rel_path] = content
             elif entry_type == "dir":
-                sub_files = self._download_directory_recursive(repo, entry.get("path", ""))
+                sub_files = self._download_directory_recursive(
+                    repo, entry.get("path", ""), ref=ref,
+                )
                 if not sub_files:
                     logger.debug("Empty or failed subdirectory: %s/%s", repo, entry.get("path", ""))
                 for sub_name, sub_content in sub_files.items():
@@ -788,7 +911,7 @@ class GitHubSource(SkillSource):
         cached = self._get_repo_tree(repo)
         if cached is None:
             return None
-        _default_branch, tree_entries = cached
+        tree_entries = cached.tree_entries
 
         # Look for SKILL.md files inside directories named <skill_name>
         skill_md_suffix = f"/{skill_name}/SKILL.md"
@@ -803,15 +926,24 @@ class GitHubSource(SkillSource):
 
         return None
 
-    def _fetch_file_content(self, repo: str, path: str) -> Optional[str]:
+    def _fetch_file_content(
+        self,
+        repo: str,
+        path: str,
+        *,
+        ref: Optional[str] = None,
+    ) -> Optional[str]:
         """Fetch a single file's content from GitHub."""
         url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        request_kwargs: Dict[str, Any] = {
+            "headers": {**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
+            "timeout": 15,
+            "follow_redirects": True,
+        }
+        if ref:
+            request_kwargs["params"] = {"ref": ref}
         try:
-            resp = httpx.get(
-                url,
-                headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
-                timeout=15, follow_redirects=True,
-            )
+            resp = httpx.get(url, **request_kwargs)
             if resp.status_code == 200:
                 return resp.text
             self._check_rate_limit_response(resp)
@@ -3311,10 +3443,17 @@ def install_from_quarantine(
         metadata=bundle.metadata,
     )
 
+    install_hash = content_hash(install_dir)
+    audit_extra = install_hash
+    provenance = bundle.metadata.get("source_provenance", {})
+    commit_sha = provenance.get("commit_sha") if isinstance(provenance, dict) else None
+    if isinstance(commit_sha, str) and commit_sha:
+        audit_extra = f"{install_hash} commit={commit_sha[:12]}"
+
     append_audit_log(
         "INSTALL", safe_skill_name, bundle.source,
         bundle.trust_level, scan_result.verdict,
-        content_hash(install_dir),
+        audit_extra,
     )
 
     return install_dir

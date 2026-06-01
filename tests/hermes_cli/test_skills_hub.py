@@ -239,6 +239,31 @@ def test_do_check_handles_no_installed_updates(monkeypatch):
     assert "No hub-installed skills to check" in output
 
 
+def test_upstream_metadata_renders_resolved_github_commit():
+    from hermes_cli.skills_hub import _format_extra_metadata_lines
+
+    commit_sha = "c" * 40
+
+    lines = _format_extra_metadata_lines({
+        "source_provenance": {
+            "type": "github",
+            "repo": "owner/repo",
+            "path": "skills/demo",
+            "default_branch": "main",
+            "commit_sha": commit_sha,
+            "immutable_ref": commit_sha,
+            "fetch_method": "git-tree",
+        }
+    })
+
+    rendered = "\n".join(lines)
+    assert "Resolved Source" in rendered
+    assert "owner/repo" in rendered
+    assert "skills/demo" in rendered
+    assert "Resolved Commit" in rendered
+    assert commit_sha[:12] in rendered
+
+
 def test_do_update_reinstalls_outdated_skills(monkeypatch):
     output, installs = _capture_update(monkeypatch, [
         {"name": "hub-skill", "identifier": "skills-sh/example/repo/hub-skill", "status": "update_available"},

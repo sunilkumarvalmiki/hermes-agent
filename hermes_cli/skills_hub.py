@@ -88,6 +88,31 @@ def _format_extra_metadata_lines(extra: Dict[str, Any]) -> list[str]:
 
     if extra.get("repo_url"):
         lines.append(f"[bold]Repo:[/] {extra['repo_url']}")
+
+    provenance = extra.get("source_provenance")
+    if isinstance(provenance, dict) and provenance.get("type") == "github":
+        repo = str(provenance.get("repo") or "")
+        path = str(provenance.get("path") or "")
+        commit_sha = str(provenance.get("commit_sha") or "")
+        default_branch = str(provenance.get("default_branch") or "")
+        fetch_method = str(provenance.get("fetch_method") or "")
+        if repo and path and commit_sha:
+            lines.append(
+                "[bold]Resolved Source:[/] "
+                f"https://github.com/{repo}/tree/{commit_sha}/{path}"
+            )
+        elif repo and commit_sha:
+            lines.append(
+                "[bold]Resolved Source:[/] "
+                f"https://github.com/{repo}/tree/{commit_sha}"
+            )
+        if commit_sha:
+            context = ", ".join(
+                value for value in (default_branch, fetch_method) if value
+            )
+            suffix = f" ({context})" if context else ""
+            lines.append(f"[bold]Resolved Commit:[/] {commit_sha[:12]}{suffix}")
+
     if extra.get("detail_url"):
         lines.append(f"[bold]Detail Page:[/] {extra['detail_url']}")
     if extra.get("index_url"):

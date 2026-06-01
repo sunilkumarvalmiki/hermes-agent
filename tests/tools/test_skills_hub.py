@@ -560,6 +560,7 @@ class TestSkillsShSource:
             {"path": "cli-tool/components/skills/development/my-skill/SKILL.md", "type": "blob"},
             {"path": "cli-tool/components/skills/development/other-skill/SKILL.md", "type": "blob"},
         ]
+        commit_sha = "d" * 40
 
         def _httpx_get_side_effect(url, **kwargs):
             resp = MagicMock()
@@ -580,7 +581,11 @@ class TestSkillsShSource:
                 resp.status_code = 200
                 resp.json = lambda: {"default_branch": "main"}
                 return resp
-            if "/git/trees/main" in url:
+            if "/git/ref/heads/main" in url:
+                resp.status_code = 200
+                resp.json = lambda: {"object": {"type": "commit", "sha": commit_sha}}
+                return resp
+            if f"/git/trees/{commit_sha}" in url:
                 resp.status_code = 200
                 resp.json = lambda: {"tree": tree_entries}
                 return resp
@@ -716,13 +721,17 @@ class TestFindSkillInRepoTree:
             {"path": "cli-tool/components/skills/development/senior-backend/SKILL.md", "type": "blob"},
             {"path": "cli-tool/components/skills/development/other/SKILL.md", "type": "blob"},
         ]
+        commit_sha = "e" * 40
 
         def _side_effect(url, **kwargs):
             resp = MagicMock()
             if url.endswith("/davila7/claude-code-templates"):
                 resp.status_code = 200
                 resp.json = lambda: {"default_branch": "main"}
-            elif "/git/trees/main" in url:
+            elif "/git/ref/heads/main" in url:
+                resp.status_code = 200
+                resp.json = lambda: {"object": {"type": "commit", "sha": commit_sha}}
+            elif f"/git/trees/{commit_sha}" in url:
                 resp.status_code = 200
                 resp.json = lambda: {"tree": tree_entries}
             else:
@@ -739,13 +748,17 @@ class TestFindSkillInRepoTree:
         tree_entries = [
             {"path": "my-skill/SKILL.md", "type": "blob"},
         ]
+        commit_sha = "f" * 40
 
         def _side_effect(url, **kwargs):
             resp = MagicMock()
             if "/contents" not in url and "/git/" not in url:
                 resp.status_code = 200
                 resp.json = lambda: {"default_branch": "main"}
-            elif "/git/trees/main" in url:
+            elif "/git/ref/heads/main" in url:
+                resp.status_code = 200
+                resp.json = lambda: {"object": {"type": "commit", "sha": commit_sha}}
+            elif f"/git/trees/{commit_sha}" in url:
                 resp.status_code = 200
                 resp.json = lambda: {"tree": tree_entries}
             else:
@@ -785,6 +798,62 @@ class TestFindSkillInRepoTree:
         mock_get.return_value = MagicMock(status_code=404)
         result = self._source()._find_skill_in_repo_tree("owner/repo", "my-skill")
         assert result is None
+
+
+class TestGitHubSourceProvenance:
+    def _source(self):
+        auth = MagicMock(spec=GitHubAuth)
+        auth.get_headers.return_value = {}
+        return GitHubSource(auth=auth)
+
+    @patch.object(GitHubSource, "_fetch_file_content")
+    @patch("tools.skills_hub.httpx.get")
+    def test_fetch_pins_tree_and_file_reads_to_resolved_commit(self, mock_get, mock_fetch):
+        commit_sha = "a" * 40
+        repo_resp = MagicMock(status_code=200, json=lambda: {"default_branch": "main"})
+        ref_resp = MagicMock(
+            status_code=200,
+            json=lambda: {"object": {"type": "commit", "sha": commit_sha}},
+        )
+        tree_resp = MagicMock(status_code=200, json=lambda: {
+            "truncated": False,
+            "tree": [{"type": "blob", "path": "skills/demo/SKILL.md"}],
+        })
+        mock_get.side_effect = [repo_resp, ref_resp, tree_resp]
+        mock_fetch.return_value = "---\nname: demo\n---\n\n# Demo\n"
+
+        bundle = self._source().fetch("owner/repo/skills/demo")
+
+        assert bundle is not None
+        assert bundle.metadata["source_provenance"] == {
+            "type": "github",
+            "repo": "owner/repo",
+            "path": "skills/demo",
+            "default_branch": "main",
+            "commit_sha": commit_sha,
+            "immutable_ref": commit_sha,
+            "fetch_method": "git-tree",
+        }
+        requested_urls = [call.args[0] for call in mock_get.call_args_list]
+        assert requested_urls[1].endswith("/repos/owner/repo/git/ref/heads/main")
+        assert requested_urls[2].endswith(f"/repos/owner/repo/git/trees/{commit_sha}")
+        mock_fetch.assert_called_once_with(
+            "owner/repo", "skills/demo/SKILL.md", ref=commit_sha,
+        )
+
+    @patch.object(GitHubSource, "_fetch_file_content")
+    @patch("tools.skills_hub.httpx.get")
+    def test_fetch_fails_closed_when_default_branch_commit_cannot_be_resolved(
+        self, mock_get, mock_fetch,
+    ):
+        repo_resp = MagicMock(status_code=200, json=lambda: {"default_branch": "main"})
+        ref_resp = MagicMock(status_code=404)
+        mock_get.side_effect = [repo_resp, ref_resp]
+
+        bundle = self._source().fetch("owner/repo/skills/demo")
+
+        assert bundle is None
+        mock_fetch.assert_not_called()
 
 
 class TestWellKnownSkillSource:
@@ -1792,7 +1861,12 @@ class TestDownloadDirectoryViaTree:
     @patch("tools.skills_hub.httpx.get")
     def test_tree_api_downloads_subdirectories(self, mock_get, mock_fetch):
         """Tree API returns files from nested subdirectories."""
+        commit_sha = "1" * 40
         repo_resp = MagicMock(status_code=200, json=lambda: {"default_branch": "main"})
+        ref_resp = MagicMock(
+            status_code=200,
+            json=lambda: {"object": {"type": "commit", "sha": commit_sha}},
+        )
         tree_resp = MagicMock(status_code=200, json=lambda: {
             "truncated": False,
             "tree": [
@@ -1803,8 +1877,8 @@ class TestDownloadDirectoryViaTree:
                 {"type": "blob", "path": "other/file.txt"},
             ],
         })
-        mock_get.side_effect = [repo_resp, tree_resp]
-        mock_fetch.side_effect = lambda repo, path: f"content-of-{path}"
+        mock_get.side_effect = [repo_resp, ref_resp, tree_resp]
+        mock_fetch.side_effect = lambda repo, path, ref=None: f"{ref}:content-of-{path}"
 
         src = self._source()
         files = src._download_directory("owner/repo", "skills/my-skill")
@@ -1819,33 +1893,43 @@ class TestDownloadDirectoryViaTree:
     @patch("tools.skills_hub.httpx.get")
     def test_falls_back_on_truncated_tree(self, mock_get, mock_fallback):
         """When tree is truncated, fall back to recursive Contents API."""
+        commit_sha = "2" * 40
         repo_resp = MagicMock(status_code=200, json=lambda: {"default_branch": "main"})
+        ref_resp = MagicMock(
+            status_code=200,
+            json=lambda: {"object": {"type": "commit", "sha": commit_sha}},
+        )
         tree_resp = MagicMock(status_code=200, json=lambda: {"truncated": True, "tree": []})
-        mock_get.side_effect = [repo_resp, tree_resp]
+        mock_get.side_effect = [repo_resp, ref_resp, tree_resp]
 
         src = self._source()
         files = src._download_directory("owner/repo", "skills/my-skill")
 
         assert files == {"SKILL.md": "# ok"}
-        mock_fallback.assert_called_once_with("owner/repo", "skills/my-skill")
+        mock_fallback.assert_called_once_with("owner/repo", "skills/my-skill", ref=commit_sha)
 
     @patch.object(GitHubSource, "_download_directory_recursive", return_value={"SKILL.md": "# ok"})
     @patch("tools.skills_hub.httpx.get")
-    def test_falls_back_on_repo_api_failure(self, mock_get, mock_fallback):
-        """When the repo endpoint returns non-200, fall back to Contents API."""
+    def test_fails_closed_on_repo_api_failure(self, mock_get, mock_fallback):
+        """When the repo head cannot be pinned, do not install from a mutable branch."""
         mock_get.return_value = MagicMock(status_code=404)
 
         src = self._source()
         files = src._download_directory("owner/repo", "skills/my-skill")
 
-        assert files == {"SKILL.md": "# ok"}
-        mock_fallback.assert_called_once()
+        assert files == {}
+        mock_fallback.assert_not_called()
 
     @patch.object(GitHubSource, "_fetch_file_content")
     @patch("tools.skills_hub.httpx.get")
     def test_tree_api_skips_failed_file_fetches(self, mock_get, mock_fetch):
         """Files that fail to fetch are skipped, not fatal."""
+        commit_sha = "3" * 40
         repo_resp = MagicMock(status_code=200, json=lambda: {"default_branch": "main"})
+        ref_resp = MagicMock(
+            status_code=200,
+            json=lambda: {"object": {"type": "commit", "sha": commit_sha}},
+        )
         tree_resp = MagicMock(status_code=200, json=lambda: {
             "truncated": False,
             "tree": [
@@ -1853,8 +1937,8 @@ class TestDownloadDirectoryViaTree:
                 {"type": "blob", "path": "skills/my-skill/scripts/run.py"},
             ],
         })
-        mock_get.side_effect = [repo_resp, tree_resp]
-        mock_fetch.side_effect = lambda repo, path: (
+        mock_get.side_effect = [repo_resp, ref_resp, tree_resp]
+        mock_fetch.side_effect = lambda repo, path, ref=None: (
             "# Skill" if path.endswith("SKILL.md") else None
         )
 
@@ -1867,13 +1951,19 @@ class TestDownloadDirectoryViaTree:
     @patch.object(GitHubSource, "_download_directory_recursive", return_value={})
     @patch("tools.skills_hub.httpx.get")
     def test_falls_back_on_network_error(self, mock_get, mock_fallback):
-        """Network errors in tree API trigger fallback."""
-        mock_get.side_effect = httpx.ConnectError("connection refused")
+        """Network errors in the pinned tree API trigger pinned Contents fallback."""
+        commit_sha = "4" * 40
+        repo_resp = MagicMock(status_code=200, json=lambda: {"default_branch": "main"})
+        ref_resp = MagicMock(
+            status_code=200,
+            json=lambda: {"object": {"type": "commit", "sha": commit_sha}},
+        )
+        mock_get.side_effect = [repo_resp, ref_resp, httpx.ConnectError("connection refused")]
 
         src = self._source()
         src._download_directory("owner/repo", "skills/my-skill")
 
-        mock_fallback.assert_called_once()
+        mock_fallback.assert_called_once_with("owner/repo", "skills/my-skill", ref=commit_sha)
 
 
 class TestDownloadDirectoryRecursive:
@@ -1903,6 +1993,31 @@ class TestDownloadDirectoryRecursive:
 
         assert "SKILL.md" in files
         assert "scripts/run.py" in files
+
+    @patch.object(GitHubSource, "_fetch_file_content")
+    @patch("tools.skills_hub.httpx.get")
+    def test_recursive_download_uses_commit_ref_for_listings_and_files(self, mock_get, mock_fetch):
+        commit_sha = "b" * 40
+        root_resp = MagicMock(status_code=200, json=lambda: [
+            {"name": "SKILL.md", "type": "file", "path": "skill/SKILL.md"},
+            {"name": "scripts", "type": "dir", "path": "skill/scripts"},
+        ])
+        sub_resp = MagicMock(status_code=200, json=lambda: [
+            {"name": "run.py", "type": "file", "path": "skill/scripts/run.py"},
+        ])
+        mock_get.side_effect = [root_resp, sub_resp]
+        mock_fetch.side_effect = lambda repo, path, ref=None: f"{ref}:{path}"
+
+        files = self._source()._download_directory_recursive(
+            "owner/repo", "skill", ref=commit_sha,
+        )
+
+        assert files["SKILL.md"] == f"{commit_sha}:skill/SKILL.md"
+        assert files["scripts/run.py"] == f"{commit_sha}:skill/scripts/run.py"
+        assert mock_get.call_args_list[0].kwargs["params"] == {"ref": commit_sha}
+        assert mock_get.call_args_list[1].kwargs["params"] == {"ref": commit_sha}
+        mock_fetch.assert_any_call("owner/repo", "skill/SKILL.md", ref=commit_sha)
+        mock_fetch.assert_any_call("owner/repo", "skill/scripts/run.py", ref=commit_sha)
 
     @patch.object(GitHubSource, "_fetch_file_content")
     @patch("tools.skills_hub.httpx.get")
