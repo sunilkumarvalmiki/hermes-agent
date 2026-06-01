@@ -352,11 +352,11 @@ class TestWebServerEndpoints:
         assert resp.status_code == 401
         resp = unauth_client.get("/api/config")
         assert resp.status_code == 401
-        # Public endpoints should still work
+        # Public liveness should still work; metadata endpoints stay gated.
         resp = unauth_client.get("/api/status")
         assert resp.status_code == 200
         resp = unauth_client.get("/api/dashboard/plugins")
-        assert resp.status_code == 200
+        assert resp.status_code == 401
         resp = unauth_client.get("/api/dashboard/plugins/rescan")
         assert resp.status_code == 401
         resp = self.client.get("/api/dashboard/plugins/rescan")
@@ -1234,8 +1234,9 @@ class TestModelInfoEndpoint:
             from starlette.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
-        from hermes_cli.web_server import app
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
         self.client = TestClient(app)
+        self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
     def test_model_info_returns_200(self):
         resp = self.client.get("/api/model/info")

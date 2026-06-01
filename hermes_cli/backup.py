@@ -64,6 +64,18 @@ _EXCLUDED_NAMES = {
 # zipfile.open() drops Unix mode bits on extract; restore tightens these to 0600.
 _SECRET_FILE_NAMES = {".env", "auth.json", "state.db"}
 
+# Import resource budgets. These keep the operator-driven restore path from
+# materializing attacker-controlled zip bombs into memory or onto disk.
+MAX_IMPORT_MEMBER_COUNT = 20_000
+MAX_IMPORT_MEMBER_BYTES = 512 * 1024 * 1024
+MAX_IMPORT_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+MAX_IMPORT_COMPRESSION_RATIO = 1_000
+IMPORT_COPY_CHUNK_BYTES = 1024 * 1024
+
+
+class BackupImportLimitError(ValueError):
+    """Raised when a backup import violates a resource budget."""
+
 
 def _should_exclude(rel_path: Path) -> bool:
     """Return True if *rel_path* (relative to hermes root) should be skipped."""
@@ -289,6 +301,71 @@ def _validate_backup_zip(zf: zipfile.ZipFile) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_import_resource_limits(
+    infos: list[zipfile.ZipInfo],
+) -> tuple[bool, str]:
+    """Validate zip member count, sizes, and expansion ratios before import."""
+    if len(infos) > MAX_IMPORT_MEMBER_COUNT:
+        return (
+            False,
+            f"zip contains {len(infos)} files; limit is {MAX_IMPORT_MEMBER_COUNT}",
+        )
+
+    total_size = 0
+    for info in infos:
+        if info.file_size > MAX_IMPORT_MEMBER_BYTES:
+            return (
+                False,
+                (
+                    f"{info.filename}: uncompressed size "
+                    f"{_format_size(info.file_size)} exceeds per-file limit "
+                    f"{_format_size(MAX_IMPORT_MEMBER_BYTES)}"
+                ),
+            )
+
+        total_size += info.file_size
+        if total_size > MAX_IMPORT_TOTAL_BYTES:
+            return (
+                False,
+                (
+                    "zip uncompressed total "
+                    f"{_format_size(total_size)} exceeds import limit "
+                    f"{_format_size(MAX_IMPORT_TOTAL_BYTES)}"
+                ),
+            )
+
+        if info.file_size > 0:
+            if info.compress_size <= 0:
+                return False, f"{info.filename}: invalid compressed size"
+            ratio = info.file_size / info.compress_size
+            if ratio > MAX_IMPORT_COMPRESSION_RATIO:
+                return (
+                    False,
+                    (
+                        f"{info.filename}: compression ratio {ratio:.1f} exceeds "
+                        f"limit {MAX_IMPORT_COMPRESSION_RATIO}"
+                    ),
+                )
+
+    return True, ""
+
+
+def _copy_zip_member_streaming(src, dst, *, expected_size: int) -> None:
+    """Copy one zip member in bounded chunks and enforce its declared size."""
+    written = 0
+    while True:
+        chunk = src.read(IMPORT_COPY_CHUNK_BYTES)
+        if not chunk:
+            break
+        next_written = written + len(chunk)
+        if next_written > expected_size:
+            raise BackupImportLimitError(
+                f"zip member expanded beyond its declared size ({expected_size} bytes)"
+            )
+        dst.write(chunk)
+        written = next_written
+
+
 def _detect_prefix(zf: zipfile.ZipFile) -> str:
     """Detect if the zip has a common directory prefix wrapping all entries.
 
@@ -335,7 +412,12 @@ def run_import(args) -> None:
             sys.exit(1)
 
         prefix = _detect_prefix(zf)
-        members = [n for n in zf.namelist() if not n.endswith("/")]
+        members = [info for info in zf.infolist() if not info.is_dir()]
+        ok, reason = _validate_import_resource_limits(members)
+        if not ok:
+            print(f"Error: {reason}")
+            sys.exit(1)
+
         file_count = len(members)
 
         print(f"Backup contains {file_count} files")
@@ -370,7 +452,8 @@ def run_import(args) -> None:
         restored = 0
         t0 = time.monotonic()
 
-        for member in members:
+        for info in members:
+            member = info.filename
             # Strip prefix if detected
             if prefix and member.startswith(prefix):
                 rel = member[len(prefix):]
@@ -391,11 +474,22 @@ def run_import(args) -> None:
 
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, open(target, "wb") as dst:
-                    dst.write(src.read())
+                with zf.open(info) as src, open(target, "wb") as dst:
+                    _copy_zip_member_streaming(
+                        src,
+                        dst,
+                        expected_size=info.file_size,
+                    )
                 if target.name in _SECRET_FILE_NAMES:
                     os.chmod(target, 0o600)
                 restored += 1
+            except BackupImportLimitError as exc:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                print(f"Error: {rel}: {exc}")
+                sys.exit(1)
             except (PermissionError, OSError) as exc:
                 errors.append(f"  {rel}: {exc}")
 

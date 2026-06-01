@@ -1,9 +1,9 @@
 """Phase 7 — /api/status exposes auth-gate state + AuthWidget integration.
 
-The dashboard's status endpoint now reports ``auth_required`` and
-``auth_providers`` so the AuthWidget + StatusPage can render the
-correct "gated / loopback" badge without a separate round trip. This
-test asserts both shapes (gated and loopback).
+The dashboard's public status endpoint now reports only ``auth_required``
+plus liveness fields so external probes can detect "gated / loopback"
+without learning local paths, provider names, or runtime topology. An
+authenticated loopback caller still receives the full StatusPage payload.
 
 The AuthWidget itself is .tsx — no Python test here. The widget's
 behaviour (renders nothing on 401, shows truncated user_id, etc.) is
@@ -61,14 +61,16 @@ def loopback_client():
 
 def test_status_reports_auth_required_in_gated_mode(gated_client):
     # No ``_login()`` call — ``/api/status`` is in the shared
-    # ``PUBLIC_API_PATHS`` allowlist precisely so external probes (and
-    # the SPA's pre-login bootstrap) can read the gate's shape without
-    # a cookie. Hit it cold.
+    # ``PUBLIC_API_PATHS`` allowlist precisely so external probes can
+    # read a minimal liveness/auth-gate shape without a cookie. Hit it cold.
     r = gated_client.get("/api/status")
     assert r.status_code == 200
     body = r.json()
     assert body["auth_required"] is True
-    assert body["auth_providers"] == ["stub"]
+    assert "auth_providers" not in body
+    assert "config_path" not in body
+    assert "env_path" not in body
+    assert "gateway_platforms" not in body
 
 
 def test_status_reports_auth_disabled_in_loopback_mode(loopback_client):
@@ -76,15 +78,19 @@ def test_status_reports_auth_disabled_in_loopback_mode(loopback_client):
     assert r.status_code == 200
     body = r.json()
     assert body["auth_required"] is False
-    # Loopback mode has no registered providers (the Nous plugin's env
-    # vars aren't set in test).
-    assert body["auth_providers"] == []
+    assert "auth_providers" not in body
+    assert "config_path" not in body
+    assert "env_path" not in body
+    assert "gateway_platforms" not in body
 
 
 def test_status_preserves_existing_fields(loopback_client):
     """Defence-in-depth: adding auth_required/auth_providers must not
     have dropped any previous field (the dashboard's React StatusPage
     relies on the full payload shape)."""
+    from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+    loopback_client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
     r = loopback_client.get("/api/status")
     body = r.json()
     expected_keys = {

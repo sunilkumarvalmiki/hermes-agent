@@ -154,6 +154,54 @@ def _require_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+_PUBLIC_STATUS_KEYS: frozenset[str] = frozenset({
+    "version",
+    "release_date",
+    "config_version",
+    "latest_config_version",
+    "gateway_running",
+    "gateway_state",
+    "auth_required",
+})
+
+
+def _public_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: payload[key]
+        for key in _PUBLIC_STATUS_KEYS
+        if key in payload
+    }
+
+
+def _has_valid_dashboard_cookie(request: Request) -> bool:
+    from hermes_cli.dashboard_auth import list_providers as _list_providers
+    from hermes_cli.dashboard_auth.base import ProviderError
+    from hermes_cli.dashboard_auth.cookies import read_session_cookies
+
+    access_token, _refresh_token = read_session_cookies(request)
+    if not access_token:
+        return False
+
+    for provider in _list_providers():
+        try:
+            if provider.verify_session(access_token=access_token) is not None:
+                return True
+        except ProviderError as exc:
+            _log.warning(
+                "dashboard-auth: provider %r unreachable during status auth: %s",
+                provider.name,
+                exc,
+            )
+            return False
+    return False
+
+
+def _has_private_status_access(request: Request) -> bool:
+    if getattr(request.app.state, "auth_required", False):
+        return _has_valid_dashboard_cookie(request)
+    return _has_valid_session_token(request)
+
+
 # Accepted Host header values for loopback binds. DNS rebinding attacks
 # point a victim browser at an attacker-controlled hostname (evil.test)
 # which resolves to 127.0.0.1 after a TTL flip — bypassing same-origin
@@ -589,7 +637,7 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
 
 
 @app.get("/api/status")
-async def get_status():
+async def get_status(request: Request):
     current_ver, latest_ver = check_config_version()
 
     # --- Gateway liveness detection ---
@@ -688,7 +736,7 @@ async def get_status():
         # Module not importable yet (early startup) — leave as [].
         pass
 
-    return {
+    payload = {
         "version": __version__,
         "release_date": __release_date__,
         "hermes_home": str(get_hermes_home()),
@@ -707,6 +755,9 @@ async def get_status():
         "auth_required": auth_required,
         "auth_providers": auth_providers,
     }
+    if _has_private_status_access(request):
+        return payload
+    return _public_status_payload(payload)
 
 
 # ---------------------------------------------------------------------------

@@ -31,19 +31,14 @@ the SPA should bootstrap it after login instead.
 from __future__ import annotations
 
 PUBLIC_API_PATHS: frozenset[str] = frozenset({
-    # Liveness probe target. Returns version, gateway state, active
-    # session count, and the dashboard auth-gate shape. No bodies, no
-    # session content, no secrets. Documented as the portal's wildcard
-    # liveness probe in
+    # Liveness probe target. Returns only version plus coarse liveness and
+    # auth-gate shape to unauthenticated callers. Local paths, PIDs, gateway
+    # topology, active session counts, auth providers, model metadata, theme
+    # definitions, and plugin manifests must stay behind dashboard auth.
+    # Documented as the portal's wildcard liveness probe in
     # ``docs/agent-dashboard-public-url-contract.md`` (NAS side).
     "/api/status",
     # Read-only config-defaults / schema feeds for the SPA's Config page.
     "/api/config/defaults",
     "/api/config/schema",
-    # Read-only model metadata (context windows, etc.) — same shape as
-    # provider catalogs already exposed on the public internet.
-    "/api/model/info",
-    # Read-only theme + plugin manifests for the dashboard skin engine.
-    "/api/dashboard/themes",
-    "/api/dashboard/plugins",
 })

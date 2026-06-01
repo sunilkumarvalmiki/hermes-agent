@@ -3,7 +3,7 @@
 Uses ``StubAuthProvider`` so the OAuth round trip can complete in-process
 without any external IDP.  Exercises:
 
-  * `/api/status` flips from public (loopback) to gated (auth_required)
+  * `/api/status` remains public but only exposes liveness/auth-gate shape
   * `/` redirects to /login when no cookie present
   * `/api/auth/providers` is the public bootstrap endpoint
   * `/login` renders HTML listing all providers
@@ -63,15 +63,10 @@ def test_gated_status_is_public(gated_app):
     (``fly-provider.ts`` ``getInstanceRuntimeStatus``) hits
     ``/api/status`` without a cookie as its sole liveness probe. A 401
     here surfaces every healthy agent as STARTING/down in the portal
-    UI. The endpoint returns only version + gateway/auth-gate metadata
-    (no user data, no session content), so it stays in the shared
-    ``PUBLIC_API_PATHS`` allowlist under both the legacy ``_SESSION_TOKEN``
-    gate and the OAuth gate.
-
-    The body also reports the gate's shape (``auth_required``,
-    ``auth_providers``) so the SPA's StatusPage and external monitors
-    can distinguish loopback / gated / no-providers without a separate
-    round trip.
+    UI. The public body returns only version + liveness/auth-gate shape
+    (no user data, no session content, no local paths, no provider names),
+    so it stays in the shared ``PUBLIC_API_PATHS`` allowlist under both
+    the legacy ``_SESSION_TOKEN`` gate and the OAuth gate.
     """
     r = gated_app.get("/api/status")
     assert r.status_code == 200, (
@@ -81,14 +76,24 @@ def test_gated_status_is_public(gated_app):
     assert body["auth_required"] is True
     assert "version" in body
     assert "gateway_state" in body
+    sensitive_keys = {
+        "hermes_home",
+        "config_path",
+        "env_path",
+        "gateway_pid",
+        "gateway_health_url",
+        "gateway_platforms",
+        "gateway_exit_reason",
+        "gateway_updated_at",
+        "active_sessions",
+        "auth_providers",
+    }
+    assert sensitive_keys.isdisjoint(body)
 
 
 @pytest.mark.parametrize("path", [
     "/api/config/defaults",
     "/api/config/schema",
-    "/api/model/info",
-    "/api/dashboard/themes",
-    "/api/dashboard/plugins",
 ])
 def test_other_public_api_paths_are_public_under_gate(gated_app, path):
     """The remaining ``PUBLIC_API_PATHS`` entries must also bypass the
@@ -111,6 +116,17 @@ def test_other_public_api_paths_are_public_under_gate(gated_app, path):
             f"{path} redirected to {location} — should be public, "
             "not bounced to /login"
         )
+
+
+@pytest.mark.parametrize("path", [
+    "/api/model/info",
+    "/api/dashboard/themes",
+    "/api/dashboard/plugins",
+])
+def test_metadata_api_paths_require_auth_under_gate(gated_app, path):
+    """Runtime/model/theme/plugin metadata must not bypass the auth gate."""
+    r = gated_app.get(path, follow_redirects=False)
+    assert r.status_code == 401
 
 
 def test_gated_html_redirects_to_login(gated_app):

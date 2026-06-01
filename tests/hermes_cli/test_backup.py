@@ -446,6 +446,125 @@ class TestImport:
         # traversal file should NOT exist outside hermes home
         assert not (tmp_path / "etc" / "passwd").exists()
 
+    def test_rejects_too_many_import_members(self, tmp_path, monkeypatch):
+        """Import rejects archives that exceed the member-count budget."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        zip_path = tmp_path / "too-many.zip"
+        self._make_backup_zip(zip_path, {
+            "config.yaml": "model: test\n",
+            "sessions/a.json": "{}",
+            "sessions/b.json": "{}",
+        })
+
+        import hermes_cli.backup as backup
+        monkeypatch.setattr(backup, "MAX_IMPORT_MEMBER_COUNT", 2, raising=False)
+
+        with pytest.raises(SystemExit):
+            backup.run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert not (hermes_home / "config.yaml").exists()
+
+    def test_rejects_import_member_above_size_limit(self, tmp_path, monkeypatch):
+        """Import rejects a member whose declared uncompressed size is too large."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        zip_path = tmp_path / "large-member.zip"
+        self._make_backup_zip(zip_path, {
+            "config.yaml": "model: test\n",
+            "payload/large.bin": b"x" * 64,
+        })
+
+        import hermes_cli.backup as backup
+        monkeypatch.setattr(backup, "MAX_IMPORT_MEMBER_BYTES", 32, raising=False)
+
+        with pytest.raises(SystemExit):
+            backup.run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert not (hermes_home / "payload" / "large.bin").exists()
+
+    def test_rejects_import_archive_above_total_size_limit(self, tmp_path, monkeypatch):
+        """Import rejects archives whose total uncompressed size is too large."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        zip_path = tmp_path / "large-total.zip"
+        self._make_backup_zip(zip_path, {
+            "config.yaml": "model: test\n",
+            "payload/a.bin": b"a" * 24,
+            "payload/b.bin": b"b" * 24,
+        })
+
+        import hermes_cli.backup as backup
+        monkeypatch.setattr(backup, "MAX_IMPORT_MEMBER_BYTES", 1024, raising=False)
+        monkeypatch.setattr(backup, "MAX_IMPORT_TOTAL_BYTES", 40, raising=False)
+
+        with pytest.raises(SystemExit):
+            backup.run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert not (hermes_home / "config.yaml").exists()
+
+    def test_rejects_high_expansion_ratio_import_member(self, tmp_path, monkeypatch):
+        """Import rejects highly compressed members before extraction."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        zip_path = tmp_path / "ratio.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("config.yaml", "model: test\n")
+            zf.writestr("payload/repeated.bin", b"A" * 4096)
+
+        import hermes_cli.backup as backup
+        monkeypatch.setattr(backup, "MAX_IMPORT_MEMBER_BYTES", 1024 * 1024, raising=False)
+        monkeypatch.setattr(backup, "MAX_IMPORT_TOTAL_BYTES", 1024 * 1024, raising=False)
+        monkeypatch.setattr(backup, "MAX_IMPORT_COMPRESSION_RATIO", 10, raising=False)
+
+        with pytest.raises(SystemExit):
+            backup.run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert not (hermes_home / "payload" / "repeated.bin").exists()
+
+    def test_import_streams_zip_members_in_chunks(self, tmp_path, monkeypatch):
+        """Import must not read whole zip members into memory at once."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        zip_path = tmp_path / "streamed.zip"
+        self._make_backup_zip(zip_path, {
+            "config.yaml": "model: test\n",
+            "payload/data.bin": b"0123456789abcdef",
+        })
+
+        import hermes_cli.backup as backup
+        monkeypatch.setattr(backup, "IMPORT_COPY_CHUNK_BYTES", 4, raising=False)
+
+        original_read = zipfile.ZipExtFile.read
+        read_sizes: list[int] = []
+
+        def tracking_read(self, size=-1):
+            read_sizes.append(size)
+            return original_read(self, size)
+
+        monkeypatch.setattr(zipfile.ZipExtFile, "read", tracking_read)
+
+        backup.run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert (hermes_home / "payload" / "data.bin").read_bytes() == b"0123456789abcdef"
+        assert read_sizes
+        assert all(size > 0 and size <= 4 for size in read_sizes)
+
     def test_confirmation_prompt_abort(self, tmp_path, monkeypatch):
         """Import aborts when user says no to confirmation."""
         hermes_home = tmp_path / ".hermes"
@@ -951,6 +1070,10 @@ class TestProfileRestoration:
             for name, content in files.items():
                 zf.writestr(name, content)
 
+    def _wrapper_path(self, wrapper_dir: Path, name: str) -> Path:
+        suffix = ".bat" if os.name == "nt" else ""
+        return wrapper_dir / f"{name}{suffix}"
+
     def test_import_creates_profile_wrappers(self, tmp_path, monkeypatch):
         """Import auto-creates wrapper scripts for restored profiles."""
         hermes_home = tmp_path / ".hermes"
@@ -980,11 +1103,11 @@ class TestProfileRestoration:
         assert (hermes_home / "profiles" / "researcher" / "config.yaml").exists()
 
         # Wrapper scripts should be created
-        assert (wrapper_dir / "coder").exists()
-        assert (wrapper_dir / "researcher").exists()
+        assert self._wrapper_path(wrapper_dir, "coder").exists()
+        assert self._wrapper_path(wrapper_dir, "researcher").exists()
 
         # Wrappers should contain the right content
-        coder_wrapper = (wrapper_dir / "coder").read_text()
+        coder_wrapper = self._wrapper_path(wrapper_dir, "coder").read_text()
         assert "hermes -p coder" in coder_wrapper
 
     def test_import_skips_profile_dirs_without_config(self, tmp_path, monkeypatch):
@@ -1010,8 +1133,8 @@ class TestProfileRestoration:
         run_import(args)
 
         # Only valid profile should get a wrapper
-        assert (wrapper_dir / "valid").exists()
-        assert not (wrapper_dir / "empty").exists()
+        assert self._wrapper_path(wrapper_dir, "valid").exists()
+        assert not self._wrapper_path(wrapper_dir, "empty").exists()
 
     def test_import_without_profiles_module(self, tmp_path, monkeypatch):
         """Import gracefully handles missing profiles module (fresh install)."""
