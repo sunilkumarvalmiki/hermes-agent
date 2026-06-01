@@ -271,6 +271,152 @@ class TestCmdInstall:
         assert exc_info.value.code == 1
 
     @patch("hermes_cli.plugins_cmd._display_after_install")
+    @patch("hermes_cli.plugins_cmd._prompt_plugin_env_vars")
+    @patch("hermes_cli.plugins_cmd._install_plugin_core")
+    def test_install_rejects_http_source_before_clone(
+        self,
+        mock_install_core,
+        mock_prompt_plugin_env_vars,
+        mock_display_after_install,
+        tmp_path,
+    ):
+        from hermes_cli.plugins_cmd import cmd_install
+
+        mock_install_core.return_value = (tmp_path, {}, "repo")
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_install("http://example.com/repo.git", enable=False)
+
+        assert exc_info.value.code == 1
+        mock_install_core.assert_not_called()
+        mock_prompt_plugin_env_vars.assert_not_called()
+        mock_display_after_install.assert_not_called()
+
+    @patch("hermes_cli.plugins_cmd._display_after_install")
+    @patch("hermes_cli.plugins_cmd._prompt_plugin_env_vars")
+    @patch("hermes_cli.plugins_cmd._install_plugin_core")
+    def test_install_rejects_local_source_without_explicit_trust(
+        self,
+        mock_install_core,
+        mock_prompt_plugin_env_vars,
+        mock_display_after_install,
+        tmp_path,
+    ):
+        from hermes_cli.plugins_cmd import cmd_install
+
+        mock_install_core.return_value = (tmp_path, {}, "repo")
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_install("file:///tmp/repo", enable=False)
+
+        assert exc_info.value.code == 1
+        mock_install_core.assert_not_called()
+        mock_prompt_plugin_env_vars.assert_not_called()
+        mock_display_after_install.assert_not_called()
+
+    @patch("hermes_cli.plugins_cmd._display_after_install")
+    @patch("hermes_cli.plugins_cmd._prompt_plugin_env_vars")
+    @patch("hermes_cli.plugins_cmd._install_plugin_core")
+    def test_install_allows_local_source_with_explicit_trust(
+        self,
+        mock_install_core,
+        mock_prompt_plugin_env_vars,
+        mock_display_after_install,
+        tmp_path,
+    ):
+        from hermes_cli.plugins_cmd import cmd_install
+
+        mock_install_core.return_value = (tmp_path, {}, "repo")
+
+        cmd_install(
+            "file:///tmp/repo",
+            enable=False,
+            allow_local_source=True,
+        )
+
+        mock_install_core.assert_called_once_with(
+            "file:///tmp/repo",
+            force=False,
+            allow_local_source=True,
+        )
+
+    def test_install_core_rejects_http_source_before_clone(self):
+        import hermes_cli.plugins_cmd as pc
+
+        with patch.object(pc.subprocess, "run") as run:
+            with pytest.raises(PluginOperationError, match="http://"):
+                pc._install_plugin_core("http://example.com/repo.git", force=True)
+
+        run.assert_not_called()
+
+    def test_install_core_rejects_local_source_before_clone_without_explicit_trust(self):
+        import hermes_cli.plugins_cmd as pc
+
+        with patch.object(pc.subprocess, "run") as run:
+            with pytest.raises(PluginOperationError, match="file://"):
+                pc._install_plugin_core("file:///tmp/repo", force=True)
+
+        run.assert_not_called()
+
+    @patch("hermes_cli.plugins_cmd._install_plugin_core")
+    def test_dashboard_install_rejects_http_source_before_clone(
+        self,
+        mock_install_core,
+    ):
+        from hermes_cli.plugins_cmd import dashboard_install_plugin
+
+        result = dashboard_install_plugin(
+            "http://example.com/repo.git",
+            force=False,
+            enable=True,
+        )
+
+        assert result["ok"] is False
+        assert "http://" in result["error"]
+        mock_install_core.assert_not_called()
+
+    @patch("hermes_cli.plugins_cmd._install_plugin_core")
+    def test_dashboard_install_rejects_local_source_without_override(
+        self,
+        mock_install_core,
+    ):
+        from hermes_cli.plugins_cmd import dashboard_install_plugin
+
+        result = dashboard_install_plugin(
+            "file:///tmp/repo",
+            force=False,
+            enable=True,
+        )
+
+        assert result["ok"] is False
+        assert "local" in result["error"].lower()
+        mock_install_core.assert_not_called()
+
+    @patch("hermes_cli.plugins_cmd.cmd_install")
+    def test_plugins_command_passes_local_source_override(self, mock_cmd_install):
+        from types import SimpleNamespace
+
+        from hermes_cli.plugins_cmd import plugins_command
+
+        args = SimpleNamespace(
+            plugins_action="install",
+            identifier="file:///tmp/repo",
+            force=True,
+            enable=False,
+            no_enable=True,
+            allow_local_source=True,
+        )
+
+        plugins_command(args)
+
+        mock_cmd_install.assert_called_once_with(
+            "file:///tmp/repo",
+            force=True,
+            enable=False,
+            allow_local_source=True,
+        )
+
+    @patch("hermes_cli.plugins_cmd._display_after_install")
     @patch("hermes_cli.plugins_cmd.shutil.move")
     @patch("hermes_cli.plugins_cmd.shutil.rmtree")
     @patch("hermes_cli.plugins_cmd._plugins_dir")

@@ -13086,6 +13086,14 @@ Examples:
         action="store_true",
         help="Remove existing plugin and reinstall",
     )
+    plugins_install.add_argument(
+        "--allow-local-source",
+        action="store_true",
+        help=(
+            "Allow trusted file:// plugin sources for local development; "
+            "http:// sources remain blocked"
+        ),
+    )
     _install_enable_group = plugins_install.add_mutually_exclusive_group()
     _install_enable_group.add_argument(
         "--enable",

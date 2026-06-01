@@ -142,10 +142,11 @@ def _resolve_git_url(identifier: str) -> str:
     - Full URL: https://github.com/owner/repo.git
     - Full URL: git@github.com:owner/repo.git
     - Full URL: ssh://git@github.com/owner/repo.git
+    - Local URL: file:///path/to/repo
     - Shorthand: owner/repo  →  https://github.com/owner/repo.git
 
-    NOTE: ``http://`` and ``file://`` schemes are accepted but will trigger a
-    security warning at install time.
+    Source-trust policy is enforced by the install path. In particular,
+    ``http://`` is blocked and ``file://`` requires explicit local-source trust.
     """
     # Already a URL
     if identifier.startswith(("https://", "http://", "git@", "ssh://", "file://")):
@@ -161,6 +162,25 @@ def _resolve_git_url(identifier: str) -> str:
         f"Invalid plugin identifier: '{identifier}'. "
         "Use a Git URL or owner/repo shorthand."
     )
+
+
+def _validate_plugin_source_policy(
+    git_url: str,
+    *,
+    allow_local_source: bool = False,
+) -> None:
+    """Reject plugin sources that cannot be trusted by default."""
+    normalized_url = git_url.lower()
+    if normalized_url.startswith("http://"):
+        raise PluginOperationError(
+            "Refusing insecure plugin source 'http://'. "
+            "Use https://, git@, or ssh:// instead."
+        )
+    if normalized_url.startswith("file://") and not allow_local_source:
+        raise PluginOperationError(
+            "Refusing local plugin source 'file://'. Re-run with "
+            "--allow-local-source only for a trusted local development repository."
+        )
 
 
 def _repo_name_from_url(url: str) -> str:
@@ -363,7 +383,12 @@ def _require_installed_plugin(name: str, plugins_dir: Path, console) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _install_plugin_core(identifier: str, *, force: bool) -> tuple[Path, dict, str]:
+def _install_plugin_core(
+    identifier: str,
+    *,
+    force: bool,
+    allow_local_source: bool = False,
+) -> tuple[Path, dict, str]:
     """Clone Git plugin into ``~/.hermes/plugins``.
 
     Returns ``(target_dir, installed_manifest, canonical_name)``.
@@ -375,6 +400,10 @@ def _install_plugin_core(identifier: str, *, force: bool) -> tuple[Path, dict, s
         git_url = _resolve_git_url(identifier)
     except ValueError as e:
         raise PluginOperationError(str(e)) from e
+    _validate_plugin_source_policy(
+        git_url,
+        allow_local_source=allow_local_source,
+    )
 
     plugins_dir = _plugins_dir()
 
@@ -460,6 +489,7 @@ def cmd_install(
     identifier: str,
     force: bool = False,
     enable: Optional[bool] = None,
+    allow_local_source: bool = False,
 ) -> None:
     """Install a plugin from a Git URL or owner/repo shorthand.
 
@@ -472,14 +502,18 @@ def cmd_install(
 
     try:
         git_url = _resolve_git_url(identifier)
-    except ValueError as e:
+        _validate_plugin_source_policy(
+            git_url,
+            allow_local_source=allow_local_source,
+        )
+    except (ValueError, PluginOperationError) as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
 
-    if git_url.startswith(("http://", "file://")):
+    if git_url.lower().startswith("file://"):
         console.print(
-            "[yellow]Warning:[/yellow] Using insecure/local URL scheme. "
-            "Consider using https:// or git@ for production installs.",
+            "[yellow]Warning:[/yellow] Installing from an explicitly trusted "
+            "local plugin source.",
         )
 
     console.print(f"[dim]Cloning {git_url}...[/dim]")
@@ -488,6 +522,7 @@ def cmd_install(
         target, installed_manifest, installed_name = _install_plugin_core(
             identifier,
             force=force,
+            allow_local_source=allow_local_source,
         )
     except PluginOperationError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -1453,17 +1488,15 @@ def dashboard_install_plugin(
     warnings: list[str] = []
     try:
         git_url = _resolve_git_url(identifier)
-        if git_url.startswith(("http://", "file://")):
-            warnings.append(
-                "Insecure URL scheme; prefer https:// or git@ for production installs.",
-            )
-    except ValueError:
-        pass
+        _validate_plugin_source_policy(git_url)
+    except (ValueError, PluginOperationError) as exc:
+        return {"ok": False, "error": str(exc)}
 
     try:
         target, installed_manifest, installed_name = _install_plugin_core(
             identifier,
             force=force,
+            allow_local_source=False,
         )
     except PluginOperationError as exc:
         return {"ok": False, "error": str(exc)}
@@ -1701,6 +1734,7 @@ def plugins_command(args) -> None:
             args.identifier,
             force=getattr(args, "force", False),
             enable=enable_arg,
+            allow_local_source=getattr(args, "allow_local_source", False),
         )
     elif action == "update":
         cmd_update(args.name)
