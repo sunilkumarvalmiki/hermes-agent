@@ -190,6 +190,104 @@ class TestVoiceAttachmentSSRFProtection:
         assert kwargs.get("follow_redirects") is True
         assert kwargs.get("event_hooks", {}).get("response") == [_ssrf_redirect_guard]
 
+    @pytest.mark.asyncio
+    async def test_download_and_cache_rejects_private_redirect_target(self, monkeypatch):
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+
+        class RedirectResponse:
+            status_code = 302
+            headers = {"Location": "http://169.254.169.254/latest/meta-data"}
+
+            def raise_for_status(self):
+                raise AssertionError("redirect response should not be treated as final")
+
+            async def aiter_bytes(self):
+                yield b""
+
+        class RedirectStream:
+            async def __aenter__(self):
+                return RedirectResponse()
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        class FakeHttpxClient:
+            def __init__(self):
+                self.calls = []
+
+            def stream(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return RedirectStream()
+
+        fake_client = FakeHttpxClient()
+        adapter._http_client = fake_client
+        monkeypatch.setattr(
+            "tools.url_safety.is_safe_url",
+            lambda url: url == "https://public.example/image.jpg",
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.qqbot.adapter.cache_image_from_bytes",
+            lambda *_args, **_kwargs: pytest.fail("unsafe redirect must not be cached"),
+        )
+
+        result = await adapter._download_and_cache(
+            "https://public.example/image.jpg",
+            "image/jpeg",
+            "image.jpg",
+        )
+
+        assert result is None
+        assert fake_client.calls[0][1]["follow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_voice_attachment_rejects_private_redirect_target(self, monkeypatch):
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+
+        class RedirectResponse:
+            status_code = 302
+            headers = {"Location": "http://169.254.169.254/latest/meta-data"}
+
+            def raise_for_status(self):
+                raise AssertionError("redirect response should not be treated as final")
+
+            async def aiter_bytes(self):
+                yield b""
+
+        class RedirectStream:
+            async def __aenter__(self):
+                return RedirectResponse()
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        class FakeHttpxClient:
+            def __init__(self):
+                self.calls = []
+
+            def stream(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return RedirectStream()
+
+        fake_client = FakeHttpxClient()
+        adapter._http_client = fake_client
+        monkeypatch.setattr(
+            "tools.url_safety.is_safe_url",
+            lambda url: url == "https://public.example/voice.silk",
+        )
+
+        result = await adapter._process_attachments(
+            [
+                {
+                    "content_type": "voice",
+                    "url": "https://public.example/voice.silk",
+                    "filename": "voice.silk",
+                }
+            ]
+        )
+
+        assert result["voice_transcripts"] == ["[Voice] [语音识别失败]"]
+        assert fake_client.calls[0][1]["follow_redirects"] is False
+
 
 # ---------------------------------------------------------------------------
 # WebSocket proxy handling

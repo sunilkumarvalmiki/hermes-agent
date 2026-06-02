@@ -1316,6 +1316,61 @@ class TestMatrixSyncLoop:
 
 class TestMatrixUploadAndSend:
     @pytest.mark.asyncio
+    async def test_send_image_rejects_private_redirect_target(self, monkeypatch):
+        """Remote image sends must validate every redirect hop before upload."""
+        from gateway.platforms.base import SendResult
+
+        adapter = _make_adapter()
+        adapter._upload_and_send = AsyncMock()
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="fallback"))
+
+        class RedirectResponse:
+            status = 302
+            headers = {"Location": "http://169.254.169.254/latest/meta-data"}
+            content_type = ""
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            async def read(self):
+                return b""
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return RedirectResponse()
+
+        session = FakeSession()
+        monkeypatch.setattr("aiohttp.ClientSession", lambda **_kwargs: session)
+        monkeypatch.setattr(
+            "tools.url_safety.is_safe_url",
+            lambda url: url == "https://public.example/image.png",
+        )
+
+        result = await adapter.send_image(
+            "!room:example.org",
+            "https://public.example/image.png",
+            caption="caption",
+        )
+
+        assert result.success is True
+        adapter._upload_and_send.assert_not_awaited()
+        adapter.send.assert_awaited_once()
+        assert session.calls[0][1]["allow_redirects"] is False
+
+    @pytest.mark.asyncio
     async def test_upload_unencrypted_room_uses_plain_url(self):
         """Unencrypted rooms should use plain 'url' key."""
         adapter = _make_adapter()

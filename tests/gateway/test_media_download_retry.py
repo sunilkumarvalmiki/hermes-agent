@@ -958,6 +958,27 @@ class TestMattermostSendUrlAsFile:
         text_arg = adapter.send.call_args[0][1]
         assert "http://cdn.example.com/img.png" in text_arg
 
+    def test_rejects_private_redirect_target(self, _mock_safe):
+        """A public media URL that redirects internal is not uploaded."""
+        _mock_safe.side_effect = lambda url: url == "http://cdn.example.com/img.png"
+        adapter = _make_mm_adapter()
+        resp = _make_aiohttp_resp(302)
+        resp.headers = {"Location": "http://169.254.169.254/latest/meta-data"}
+        adapter._session.get = MagicMock(return_value=resp)
+
+        async def run():
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                return await adapter._send_url_as_file(
+                    "C123", "http://cdn.example.com/img.png", "caption", None
+                )
+
+        result = asyncio.run(run())
+
+        assert result.success
+        adapter._upload_file.assert_not_called()
+        adapter.send.assert_called_once()
+        assert adapter._session.get.call_args.kwargs["allow_redirects"] is False
+
     def test_non_retryable_404_falls_back_immediately(self, _mock_safe):
         """404 is non-retryable (< 500, != 429); send() is called right away."""
         adapter = _make_mm_adapter()

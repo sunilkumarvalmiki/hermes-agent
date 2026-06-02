@@ -1870,6 +1870,60 @@ class TestAdapterBehavior(unittest.TestCase):
         # down, which only works by accident (httpx's eager buffering).
         self.assertLess(events.index("content_read"), events.index("client_exit"))
 
+    def test_download_remote_document_rejects_private_redirect_target(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        class _RedirectResponse:
+            status_code = 302
+            headers = {"Location": "http://169.254.169.254/latest/meta-data"}
+
+            def raise_for_status(self) -> None:
+                raise AssertionError("redirect response should not be treated as final")
+
+            async def aiter_bytes(self):
+                yield b""
+
+        class _RedirectStream:
+            async def __aenter__(self) -> _RedirectResponse:
+                return _RedirectResponse()
+
+            async def __aexit__(self, *_exc: object) -> None:
+                return None
+
+        class _FakeAsyncClient:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def __aenter__(self) -> "_FakeAsyncClient":
+                return self
+
+            async def __aexit__(self, *_exc: object) -> None:
+                return None
+
+            def stream(self, *args: object, **kwargs: object) -> _RedirectStream:
+                self.calls.append((args, kwargs))
+                return _RedirectStream()
+
+        fake_client = _FakeAsyncClient()
+        adapter = FeishuAdapter(PlatformConfig())
+
+        async def _run() -> None:
+            with patch(
+                "tools.url_safety.is_safe_url",
+                side_effect=lambda url: url == "https://public.example/doc.pdf",
+            ):
+                with patch("httpx.AsyncClient", lambda *_args, **_kwargs: fake_client):
+                    await adapter._download_remote_document(
+                        "https://public.example/doc.pdf",
+                        default_ext=".pdf",
+                        preferred_name="doc.pdf",
+                    )
+
+        with self.assertRaisesRegex(ValueError, "Blocked redirect"):
+            asyncio.run(_run())
+        self.assertFalse(fake_client.calls[0][1]["follow_redirects"])
+
     def test_dedup_state_persists_across_adapter_restart(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter

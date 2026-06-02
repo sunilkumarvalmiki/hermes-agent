@@ -160,6 +160,66 @@ async def test_send_does_not_retry_on_unrelated_errors():
     assert send_calls[0]["reference"] is reference_obj
 
 
+@pytest.mark.asyncio
+async def test_send_image_rejects_private_redirect_target(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    class RedirectResponse:
+        status = 302
+        headers = {"Location": "http://169.254.169.254/latest/meta-data"}
+        content_type = ""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def read(self):
+            return b""
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return RedirectResponse()
+
+    session = FakeSession()
+    channel = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=1234)))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+    monkeypatch.setattr("aiohttp.ClientSession", lambda **_kwargs: session)
+    monkeypatch.setattr(
+        "plugins.platforms.discord.adapter.is_safe_url",
+        lambda url: url == "https://public.example/image.png",
+    )
+    monkeypatch.setattr(
+        "tools.url_safety.is_safe_url",
+        lambda url: url == "https://public.example/image.png",
+    )
+
+    result = await adapter.send_image(
+        "555",
+        "https://public.example/image.png",
+        caption="caption",
+    )
+
+    assert result.success is True
+    assert session.calls[0][1]["allow_redirects"] is False
+    assert channel.send.await_count == 1
+    assert "file" not in channel.send.await_args.kwargs
+
+
 # ---------------------------------------------------------------------------
 # Forum channel tests
 # ---------------------------------------------------------------------------
