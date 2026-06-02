@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import tarfile
@@ -524,6 +525,56 @@ def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
 
 
 
+def _validated_skills_tar_target(root: Path, member: tarfile.TarInfo) -> Path:
+    """Return the extraction target for a safe skills backup member."""
+    name = member.name
+    if not name or name.startswith("/") or ".." in Path(name).parts:
+        raise tarfile.TarError(f"refusing to extract unsafe path: {name!r}")
+
+    target = (root / name).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise tarfile.TarError(f"refusing to extract unsafe path: {name!r}") from exc
+
+    if member.issym() or member.islnk():
+        raise tarfile.TarError(
+            f"refusing to extract unsafe link: {name!r} -> {member.linkname!r}"
+        )
+
+    if not member.isdir() and not member.isfile():
+        raise tarfile.TarError(f"refusing to extract unsupported member: {name!r}")
+
+    return target
+
+
+def _extract_skills_tar_safely(tf: tarfile.TarFile, skills: Path) -> None:
+    """Extract a curator snapshot without trusting tar path or link metadata."""
+    root = skills.resolve()
+    for member in tf.getmembers():
+        target = _validated_skills_tar_target(root, member)
+
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(target, member.mode & 0o777)
+            except OSError:
+                pass
+            continue
+
+        source = tf.extractfile(member)
+        if source is None:
+            raise tarfile.TarError(f"cannot read archive member: {member.name!r}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with source, open(target, "wb") as dst:
+            shutil.copyfileobj(source, dst)
+        try:
+            os.chmod(target, member.mode & 0o777)
+        except OSError:
+            pass
+
+
 def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]]:
     """Restore ``~/.hermes/skills/`` from a snapshot.
 
@@ -600,20 +651,7 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
     # Step 4: extract the snapshot into skills/
     try:
         with tarfile.open(archive, "r:gz") as tf:
-            # Python 3.12+ supports filter='data' for safer extraction.
-            # Fall back to the unfiltered call for older interpreters but
-            # still reject absolute paths and .. components defensively.
-            for member in tf.getmembers():
-                name = member.name
-                if name.startswith("/") or ".." in Path(name).parts:
-                    raise tarfile.TarError(
-                        f"refusing to extract unsafe path: {name!r}"
-                    )
-            try:
-                tf.extractall(str(skills), filter="data")  # type: ignore[call-arg]
-            except TypeError:
-                # Python < 3.12 — no filter kwarg
-                tf.extractall(str(skills))
+            _extract_skills_tar_safely(tf, skills)
     except (OSError, tarfile.TarError) as e:
         # Best-effort recover: move staged contents back
         for orig, dest in moved:

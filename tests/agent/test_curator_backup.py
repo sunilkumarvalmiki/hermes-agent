@@ -259,6 +259,63 @@ def test_rollback_rejects_unsafe_tarball(backup_env, monkeypatch):
     assert "unsafe" in msg.lower() or "refus" in msg.lower() or "extract" in msg.lower()
 
 
+def test_rollback_rejects_link_metadata_in_legacy_tar_fallback(
+    backup_env,
+    monkeypatch,
+    tmp_path,
+):
+    """Safe member names are not enough: tar link metadata can point outside.
+
+    The monkeypatch simulates older Python where extractall(filter="data") is
+    unavailable, so rollback must reject links before reaching unfiltered
+    extractall().
+    """
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    _write_skill(skills, "alpha")
+    cb.snapshot_skills(reason="legit")
+
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("outside", encoding="utf-8")
+
+    rows = cb.list_backups()
+    snap_dir = Path(rows[0]["path"])
+    mal = snap_dir / "skills.tar.gz"
+    mal.unlink()
+    with tarfile.open(mal, "w:gz") as tf:
+        link = tarfile.TarInfo("linked-skill/SKILL.md")
+        link.type = tarfile.LNKTYPE
+        link.linkname = str(outside)
+        tf.addfile(link)
+
+    original_extractall = tarfile.TarFile.extractall
+
+    def legacy_extractall(
+        self,
+        path=".",
+        members=None,
+        *,
+        numeric_owner=False,
+        filter=None,
+    ):
+        if filter is not None:
+            raise TypeError("extractall() got an unexpected keyword argument 'filter'")
+        return original_extractall(
+            self,
+            path=path,
+            members=members,
+            numeric_owner=numeric_owner,
+        )
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", legacy_extractall)
+
+    ok, msg, _ = cb.rollback()
+
+    assert not ok
+    assert "link" in msg.lower() or "unsupported" in msg.lower()
+    assert not (skills / "linked-skill" / "SKILL.md").exists()
+
+
 # ---------------------------------------------------------------------------
 # Integration with run_curator_review
 # ---------------------------------------------------------------------------
