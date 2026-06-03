@@ -8,6 +8,11 @@
     "ghcr.io/devcontainers/features/git-lfs:1": {},
     "ghcr.io/devcontainers/features/node:1": {
       "version": "20"
+    },
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "latest",
+      "profile": "minimal",
+      "components": "rustfmt,clippy,rust-analyzer"
     }
   },
   "containerEnv": {
@@ -24,6 +29,7 @@
         "ms-python.debugpy",
         "ms-python.python",
         "ms-python.vscode-pylance",
+        "rust-lang.rust-analyzer",
         "redhat.vscode-yaml",
         "tamasfe.even-better-toml",
         "charliermarsh.ruff"
