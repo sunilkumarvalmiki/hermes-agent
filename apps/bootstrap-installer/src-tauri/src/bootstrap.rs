@@ -230,15 +230,22 @@ pub(crate) fn resolve_hermes_desktop_exe(install_root: &std::path::Path) -> Opti
     None
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn resolve_hermes_desktop_app(install_root: &std::path::Path) -> Option<PathBuf> {
     let exe = resolve_hermes_desktop_exe(install_root)?;
-    // .../Hermes.app/Contents/MacOS/Hermes -> .../Hermes.app
-    let app = exe.parent()?.parent()?.parent()?.to_path_buf();
-    if app.extension().and_then(|e| e.to_str()) == Some("app") && app.is_dir() {
-        return Some(app);
+    #[cfg(target_os = "macos")]
+    {
+        // .../Hermes.app/Contents/MacOS/Hermes -> .../Hermes.app
+        let app = exe.parent()?.parent()?.parent()?.to_path_buf();
+        if app.extension().and_then(|e| e.to_str()) == Some("app") && app.is_dir() {
+            return Some(app);
+        }
+        return None;
     }
-    None
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(exe)
+    }
 }
 
 /// True when a prior install completed (bootstrap-complete marker present) AND a
@@ -818,8 +825,8 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::path::Path;
+    use std::path::PathBuf;
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!(
