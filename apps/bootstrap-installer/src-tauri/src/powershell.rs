@@ -154,7 +154,10 @@ pub async fn run_script(
     })
 }
 
-fn stable_script_cwd<'a>(script_path: &'a Path, hermes_home_override: Option<&'a str>) -> Option<&'a Path> {
+fn stable_script_cwd<'a>(
+    script_path: &'a Path,
+    hermes_home_override: Option<&'a str>,
+) -> Option<&'a Path> {
     if let Some(home) = hermes_home_override {
         let path = Path::new(home);
         if path.is_dir() {
@@ -244,9 +247,6 @@ pub fn parse_manifest(stdout: &str) -> Option<crate::events::Manifest> {
     }
     None
 }
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 
 #[cfg(test)]
 mod tests {

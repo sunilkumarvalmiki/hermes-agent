@@ -163,17 +163,18 @@ pub async fn get_bootstrap_status(
 /// (e.g. when Stage-Desktop was skipped) so the frontend can present
 /// actionable failure UI rather than silently doing nothing.
 #[tauri::command]
-pub async fn launch_hermes_desktop(
-    app: AppHandle,
-    install_root: String,
-) -> Result<(), String> {
+pub async fn launch_hermes_desktop(app: AppHandle, install_root: String) -> Result<(), String> {
     let install_root = PathBuf::from(install_root);
     let exe_path = resolve_hermes_desktop_exe(&install_root).ok_or_else(|| {
         format!(
             "Couldn't find a built Hermes desktop at {}. The desktop build step \
              may have been skipped or failed. Run `hermes desktop` from a \
              terminal to build and launch it.",
-            install_root.join("apps").join("desktop").join("release").display()
+            install_root
+                .join("apps")
+                .join("desktop")
+                .join("release")
+                .display()
         )
     })?;
 
@@ -186,17 +187,12 @@ pub async fn launch_hermes_desktop(
     let mut cmd = desktop_launch_command(&exe_path, &install_root);
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         // DETACHED_PROCESS = 0x00000008
         cmd.creation_flags(0x0000_0008);
     }
 
-    cmd.spawn().map_err(|e| {
-        format!(
-            "failed to launch {}: {e}",
-            exe_path.display()
-        )
-    })?;
+    cmd.spawn()
+        .map_err(|e| format!("failed to launch {}: {e}", exe_path.display()))?;
 
     // Give Windows ~150ms to actually start the new process before we exit.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -234,21 +230,14 @@ pub(crate) fn resolve_hermes_desktop_exe(install_root: &std::path::Path) -> Opti
     None
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn resolve_hermes_desktop_app(install_root: &std::path::Path) -> Option<PathBuf> {
     let exe = resolve_hermes_desktop_exe(install_root)?;
-    #[cfg(target_os = "macos")]
-    {
-        // .../Hermes.app/Contents/MacOS/Hermes -> .../Hermes.app
-        let app = exe.parent()?.parent()?.parent()?.to_path_buf();
-        if app.extension().and_then(|e| e.to_str()) == Some("app") && app.is_dir() {
-            return Some(app);
-        }
+    // .../Hermes.app/Contents/MacOS/Hermes -> .../Hermes.app
+    let app = exe.parent()?.parent()?.parent()?.to_path_buf();
+    if app.extension().and_then(|e| e.to_str()) == Some("app") && app.is_dir() {
+        return Some(app);
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        return Some(exe);
-    }
-    #[allow(unreachable_code)]
     None
 }
 
@@ -256,7 +245,7 @@ pub(crate) fn resolve_hermes_desktop_app(install_root: &std::path::Path) -> Opti
 /// launchable desktop app exists on disk. Used by the installer's launcher fast
 /// path so a bare re-open just opens Hermes instead of re-running setup.
 pub(crate) fn hermes_is_installed(install_root: &std::path::Path) -> bool {
-    install_root.join(".hermes-bootstrap-complete").exists()
+    crate::paths::likely_bootstrap_marker(install_root).exists()
         && resolve_hermes_desktop_exe(install_root).is_some()
 }
 
@@ -348,8 +337,12 @@ async fn run_bootstrap(
     let kind = ScriptKind::for_current_os();
 
     let pin = Pin {
-        commit: args.commit.or_else(|| option_env_string("BUILD_PIN_COMMIT")),
-        branch: args.branch.or_else(|| option_env_string("BUILD_PIN_BRANCH")),
+        commit: args
+            .commit
+            .or_else(|| option_env_string("BUILD_PIN_COMMIT")),
+        branch: args
+            .branch
+            .or_else(|| option_env_string("BUILD_PIN_BRANCH")),
     };
 
     tracing::info!(
@@ -443,20 +436,21 @@ async fn run_bootstrap(
         return Err(anyhow!(err));
     }
 
-    let manifest: Manifest = powershell::parse_manifest(&manifest_result.stdout).ok_or_else(|| {
-        let err = format!(
-            "install.ps1 -Manifest produced no parseable JSON payload\n{}",
-            truncate(&manifest_result.stdout, 4000)
-        );
-        emit_event(
-            &app,
-            BootstrapEvent::Failed {
-                stage: None,
-                error: err.clone(),
-            },
-        );
-        anyhow!(err)
-    })?;
+    let manifest: Manifest =
+        powershell::parse_manifest(&manifest_result.stdout).ok_or_else(|| {
+            let err = format!(
+                "install.ps1 -Manifest produced no parseable JSON payload\n{}",
+                truncate(&manifest_result.stdout, 4000)
+            );
+            emit_event(
+                &app,
+                BootstrapEvent::Failed {
+                    stage: None,
+                    error: err.clone(),
+                },
+            );
+            anyhow!(err)
+        })?;
 
     emit_event(
         &app,
@@ -650,7 +644,10 @@ async fn run_bootstrap(
     // we're already running from that path. Best-effort — a failure here must
     // not fail an otherwise-successful install.
     if let Err(err) = crate::paths::copy_self_to_hermes_home() {
-        tracing::warn!(?err, "failed to copy installer into HERMES_HOME (non-fatal)");
+        tracing::warn!(
+            ?err,
+            "failed to copy installer into HERMES_HOME (non-fatal)"
+        );
         emit_log(&format!(
             "[bootstrap] warning: could not stage updater binary: {err}"
         ));

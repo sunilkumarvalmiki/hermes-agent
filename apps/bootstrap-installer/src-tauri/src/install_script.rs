@@ -34,6 +34,10 @@ pub struct ResolvedScript {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptSource {
     DevCheckout,
+    #[expect(
+        dead_code,
+        reason = "reserved for the documented Tauri resource fallback path"
+    )]
     Bundled,
     Cached,
     Downloaded,
@@ -81,7 +85,9 @@ pub async fn resolve(
 ) -> Result<ResolvedScript> {
     // 1. Dev shortcut.
     if let Ok(repo_root) = std::env::var("HERMES_SETUP_DEV_REPO_ROOT") {
-        let candidate = PathBuf::from(repo_root).join("scripts").join(kind.filename());
+        let candidate = PathBuf::from(repo_root)
+            .join("scripts")
+            .join(kind.filename());
         if candidate.exists() {
             emit_log(&format!(
                 "[bootstrap] dev mode — using local {} at {}",
@@ -195,9 +201,8 @@ async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Re
     );
 
     if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("creating bootstrap-cache parent dir {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating bootstrap-cache parent dir {}", parent.display()))?;
     }
 
     let tmp_path = dest_path.with_extension({
@@ -240,13 +245,7 @@ async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Re
 
     tokio::fs::rename(&tmp_path, dest_path)
         .await
-        .with_context(|| {
-            format!(
-                "renaming {} → {}",
-                tmp_path.display(),
-                dest_path.display()
-            )
-        })?;
+        .with_context(|| format!("renaming {} → {}", tmp_path.display(), dest_path.display()))?;
 
     Ok(())
 }

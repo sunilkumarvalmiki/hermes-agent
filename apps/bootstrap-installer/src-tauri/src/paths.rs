@@ -95,7 +95,10 @@ pub fn copy_self_to_hermes_home() -> std::io::Result<()> {
         _ => src == dest,
     };
     if same {
-        tracing::info!(?dest, "installer already at destination; skipping self-copy");
+        tracing::info!(
+            ?dest,
+            "installer already at destination; skipping self-copy"
+        );
         return Ok(());
     }
 

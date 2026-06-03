@@ -169,8 +169,7 @@ async fn run_update(app: AppHandle) -> Result<()> {
         &format!("[update] updating against branch {update_branch}"),
     );
     let child_env = update_child_env(&install_root);
-    let mut update_args: Vec<String> =
-        vec!["update".into(), "--yes".into(), "--gateway".into()];
+    let mut update_args: Vec<String> = vec!["update".into(), "--yes".into(), "--gateway".into()];
     update_args.push("--branch".into());
     update_args.push(update_branch);
 
@@ -278,7 +277,13 @@ async fn run_update(app: AppHandle) -> Result<()> {
         );
         return Err(anyhow!(msg));
     }
-    emit_stage(&app, "rebuild", StageState::Succeeded, Some(rebuild_ms), None);
+    emit_stage(
+        &app,
+        "rebuild",
+        StageState::Succeeded,
+        Some(rebuild_ms),
+        None,
+    );
 
     let launch_target = if let Some(target_app) = target_app {
         let started = Instant::now();
@@ -335,8 +340,11 @@ async fn run_update(app: AppHandle) -> Result<()> {
                 &format!("[update] could not auto-launch desktop: {err}. Launch Hermes manually."),
             );
         }
-    } else if let Err(err) =
-        crate::bootstrap::launch_hermes_desktop(app.clone(), install_root.to_string_lossy().into_owned()).await
+    } else if let Err(err) = crate::bootstrap::launch_hermes_desktop(
+        app.clone(),
+        install_root.to_string_lossy().into_owned(),
+    )
+    .await
     {
         // Launch failed: don't hard-fail the update (it succeeded); surface a
         // log line so the success screen can still tell the user to launch
@@ -359,7 +367,12 @@ async fn wait_for_venv_free(install_root: &Path, app: &AppHandle) {
     let shim = venv_hermes(install_root);
     let deadline = Instant::now() + DESKTOP_EXIT_WAIT;
 
-    emit_log(app, Some("update"), LogStream::Stdout, "[update] waiting for Hermes to exit…");
+    emit_log(
+        app,
+        Some("update"),
+        LogStream::Stdout,
+        "[update] waiting for Hermes to exit…",
+    );
 
     loop {
         if !is_locked(&shim) {
@@ -386,10 +399,11 @@ fn is_locked(path: &Path) -> bool {
     if !path.exists() {
         return false;
     }
-    match std::fs::OpenOptions::new().read(true).write(true).open(path) {
-        Ok(_) => false,
-        Err(_) => true,
-    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .is_err()
 }
 
 /// Spawn `hermes <args>` from `cwd`, stream stdout/stderr as Log events on the
@@ -415,7 +429,6 @@ async fn run_streamed(
 
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW = 0x08000000 — no flashing console behind the GUI.
         cmd.creation_flags(0x0800_0000);
     }
@@ -451,7 +464,10 @@ async fn run_streamed(
         emit_log(app, stage_owned.as_deref(), LogStream::Stderr, &l);
     }
 
-    let status = child.wait().await.map_err(|e| anyhow!("waiting for child: {e}"))?;
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| anyhow!("waiting for child: {e}"))?;
     Ok(CmdResult {
         exit_code: status.code(),
     })
@@ -478,9 +494,17 @@ fn resolve_hermes(install_root: &Path) -> Option<PathBuf> {
         return Some(shim);
     }
     // PATH fallback. which-style probe via env, kept dependency-free.
-    let exe = if cfg!(target_os = "windows") { "hermes.exe" } else { "hermes" };
+    let exe = if cfg!(target_os = "windows") {
+        "hermes.exe"
+    } else {
+        "hermes"
+    };
     if let Ok(path) = std::env::var("PATH") {
-        let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
+        let sep = if cfg!(target_os = "windows") {
+            ';'
+        } else {
+            ':'
+        };
         for dir in path.split(sep) {
             let cand = Path::new(dir).join(exe);
             if cand.exists() {
@@ -572,12 +596,17 @@ async fn install_macos_app_update(
         ));
     }
 
-    let rebuilt_app = crate::bootstrap::resolve_hermes_desktop_app(install_root).ok_or_else(|| {
-        anyhow!(
-            "desktop rebuild succeeded but no Hermes.app was found under {}",
-            install_root.join("apps").join("desktop").join("release").display()
-        )
-    })?;
+    let rebuilt_app =
+        crate::bootstrap::resolve_hermes_desktop_app(install_root).ok_or_else(|| {
+            anyhow!(
+                "desktop rebuild succeeded but no Hermes.app was found under {}",
+                install_root
+                    .join("apps")
+                    .join("desktop")
+                    .join("release")
+                    .display()
+            )
+        })?;
 
     let same = match (rebuilt_app.canonicalize(), target_app.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -671,6 +700,7 @@ async fn install_macos_app_update(
     Ok(target_app.to_path_buf())
 }
 
+#[cfg(target_os = "macos")]
 async fn remove_dir_if_exists(path: &Path) {
     if path.exists() {
         let _ = tokio::fs::remove_dir_all(path).await;
@@ -793,6 +823,9 @@ mod tests {
             target_app_from_args(["--update", "--target-app", "/Applications/Hermes.app"]),
             Some(PathBuf::from("/Applications/Hermes.app"))
         );
-        assert_eq!(target_app_from_args(["--target-app", "/tmp/not-an-app"]), None);
+        assert_eq!(
+            target_app_from_args(["--target-app", "/tmp/not-an-app"]),
+            None
+        );
     }
 }

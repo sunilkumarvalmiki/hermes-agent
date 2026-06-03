@@ -11,8 +11,8 @@
 mod bootstrap;
 mod events;
 mod install_script;
-mod powershell;
 mod paths;
+mod powershell;
 mod update;
 
 use std::sync::Arc;
@@ -160,7 +160,9 @@ pub fn run() {
                     }
                 }
                 None => {
-                    tracing::error!("main installer window not found; installer UI will not appear");
+                    tracing::error!(
+                        "main installer window not found; installer UI will not appear"
+                    );
                 }
             }
             Ok(())
