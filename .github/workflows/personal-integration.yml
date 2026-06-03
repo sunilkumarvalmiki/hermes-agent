@@ -106,23 +106,20 @@ jobs:
           node-version: "20"
           cache: "npm"
 
-      - name: Install root browser tooling
+      - name: Install workspace dependencies
         run: npm ci
 
-      - name: Install TUI dependencies
-        run: npm ci --prefix ui-tui
-
       - name: Type-check TUI
-        run: npm run type-check --prefix ui-tui
+        run: npm run type-check --workspace ui-tui
 
       - name: Build TUI
-        run: npm run build --prefix ui-tui
+        run: npm run build --workspace ui-tui
 
       - name: Build hermes-ink package entry
-        run: npm run build --prefix ui-tui/packages/hermes-ink
+        run: npm run build --workspace ui-tui/packages/hermes-ink
 
       - name: Test TUI
-        run: npm test --prefix ui-tui
+        run: npm test --workspace ui-tui
 
   full-python-tests:
     name: full python tests (${{ matrix.slice }}/6)

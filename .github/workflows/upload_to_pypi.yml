@@ -55,11 +55,14 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install frontend workspace dependencies
+        run: npm ci
+
       - name: Build web dashboard
-        run: cd web && npm ci && npm run build
+        run: npm run build --workspace web
 
       - name: Build TUI bundle
-        run: cd ui-tui && npm ci && npm run build
+        run: npm run build --workspace ui-tui
 
       - name: Bundle TUI into hermes_cli
         run: |
