@@ -181,7 +181,12 @@ def test_gui_linux_rejects_symlink_sandbox(tmp_path, monkeypatch):
     target = tmp_path / "dangerous"
     target.write_text("pwned", encoding="utf-8")
     sandbox = packaged_exe.parent / "chrome-sandbox"
-    sandbox.symlink_to(target)
+    try:
+        sandbox.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
 
     with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/sudo"), \
          patch("hermes_cli.main.subprocess.run") as mock_run, \

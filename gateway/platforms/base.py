@@ -1146,6 +1146,43 @@ _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS = (
 )
 
 
+def _env_home_path() -> Optional[Path]:
+    """Return HOME as a Path when explicitly configured, else platform home."""
+    home = os.environ.get("HOME", "").strip()
+    if home:
+        return Path(home)
+    try:
+        return Path(os.path.expanduser("~"))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _expand_home_path(raw: str) -> Path:
+    """Expand ``~`` using HOME when provided, including on Windows."""
+    text = str(raw)
+    if "\x00" in text:
+        raise ValueError("embedded null byte")
+    if text == "~":
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            return Path(home)
+    if text.startswith("~/") or text.startswith("~\\"):
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            return Path(home) / text[2:]
+    return Path(os.path.expanduser(text))
+
+
+def _expand_home_string(raw: str) -> str:
+    """String form of ``_expand_home_path`` for media extraction helpers."""
+    text = str(raw)
+    if "\x00" in text:
+        raise ValueError("embedded null byte")
+    if text == "~" or text.startswith("~/") or text.startswith("~\\"):
+        return str(_expand_home_path(text))
+    return os.path.expanduser(text)
+
+
 def _media_delivery_allowed_roots() -> List[Path]:
     """Return roots from which model-emitted local media may be delivered."""
     roots = [Path(root) for root in MEDIA_DELIVERY_SAFE_ROOTS]
@@ -1155,7 +1192,10 @@ def _media_delivery_allowed_roots() -> List[Path]:
             raw_root = raw_root.strip()
             if not raw_root:
                 continue
-            root = Path(os.path.expanduser(raw_root))
+            try:
+                root = _expand_home_path(raw_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
             if root.is_absolute():
                 roots.append(root)
     return roots
@@ -1197,9 +1237,10 @@ def _media_delivery_strict_mode() -> bool:
 def _media_delivery_denied_paths() -> List[Path]:
     """Return absolute denylist paths under which delivery is never allowed."""
     denied = [Path(p) for p in _MEDIA_DELIVERY_DENIED_PREFIXES]
-    home = Path(os.path.expanduser("~"))
-    for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS:
-        denied.append(home / sub)
+    home = _env_home_path()
+    if home is not None:
+        for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS:
+            denied.append(home / sub)
     # The active Hermes profile and shared Hermes root both contain control
     # files and credentials. Only cache subdirectories under them are
     # explicitly allowlisted above.
@@ -1226,7 +1267,8 @@ def _path_under_denied_prefix(resolved: Path) -> bool:
     credential location or another user's home.
     """
     try:
-        home = Path(os.path.expanduser("~")).resolve(strict=False)
+        env_home = _env_home_path()
+        home = env_home.resolve(strict=False) if env_home is not None else None
     except (OSError, RuntimeError, ValueError):
         home = None
     for denied in _media_delivery_denied_paths():
@@ -1300,7 +1342,7 @@ def validate_media_delivery_path(path: str) -> Optional[str]:
         return None
 
     try:
-        expanded = Path(os.path.expanduser(candidate))
+        expanded = _expand_home_path(candidate)
     except (OSError, RuntimeError, ValueError):
         # expanduser raises ValueError("embedded null byte") for a ~\x00 path.
         return None
@@ -3189,7 +3231,7 @@ class BasePlatformAdapter(ABC):
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
             if path:
                 try:
-                    media.append((os.path.expanduser(path), has_voice_tag))
+                    media.append((_expand_home_string(path), has_voice_tag))
                 except (OSError, RuntimeError, ValueError):
                     # Skip a crafted ~\x00 path rather than aborting extraction
                     # and dropping every other attachment in the response.
@@ -3268,7 +3310,10 @@ class BasePlatformAdapter(ABC):
             if _in_code(match.start()):
                 continue
             raw = match.group(0)
-            expanded = os.path.expanduser(raw)
+            try:
+                expanded = _expand_home_string(raw)
+            except (OSError, RuntimeError, ValueError):
+                continue
             if os.path.isfile(expanded):
                 found.append((raw, expanded))
 

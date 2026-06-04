@@ -7,6 +7,7 @@ without risk of circular imports.
 import os
 import sys
 import sysconfig
+import tempfile
 from contextvars import ContextVar, Token
 from pathlib import Path
 
@@ -45,9 +46,30 @@ def _get_platform_default_hermes_home() -> Path:
     """Return the platform-native default Hermes home path."""
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
-        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        base = Path(local_appdata) if local_appdata else _windows_local_appdata_fallback()
         return base / "hermes"
-    return Path.home() / ".hermes"
+    try:
+        return Path.home() / ".hermes"
+    except RuntimeError:
+        return Path(tempfile.gettempdir()) / "hermes"
+
+
+def _windows_local_appdata_fallback() -> Path:
+    """Return a usable Windows local-appdata base even with a sparse env."""
+    for env_name in ("USERPROFILE", "HOME"):
+        raw = os.environ.get(env_name, "").strip()
+        if raw:
+            return Path(raw) / "AppData" / "Local"
+
+    drive = os.environ.get("HOMEDRIVE", "").strip()
+    path = os.environ.get("HOMEPATH", "").strip()
+    if drive and path:
+        return Path(drive + path) / "AppData" / "Local"
+
+    try:
+        return Path.home() / "AppData" / "Local"
+    except RuntimeError:
+        return Path(tempfile.gettempdir())
 
 
 def get_hermes_home() -> Path:

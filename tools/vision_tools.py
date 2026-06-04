@@ -74,6 +74,22 @@ _VISION_DOWNLOAD_TIMEOUT = _resolve_download_timeout()
 _VISION_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
 
+def _expand_home_path(raw: str) -> Path:
+    """Expand ``~`` using HOME when provided, including on Windows."""
+    text = str(raw)
+    if "\x00" in text:
+        raise ValueError("embedded null byte")
+    if text == "~":
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            return Path(home)
+    if text.startswith("~/") or text.startswith("~\\"):
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            return Path(home) / text[2:]
+    return Path(os.path.expanduser(text))
+
+
 def _validate_image_url(url: str) -> bool:
     """
     Basic validation of image URL format.
@@ -699,7 +715,7 @@ async def _vision_analyze_native(
         resolved_url = image_url
         if resolved_url.startswith("file://"):
             resolved_url = resolved_url[len("file://"):]
-        local_path = Path(os.path.expanduser(resolved_url))
+        local_path = _expand_home_path(resolved_url)
 
         if local_path.is_file():
             temp_image_path = local_path
@@ -852,7 +868,7 @@ async def vision_analyze_tool(
         resolved_url = image_url
         if resolved_url.startswith("file://"):
             resolved_url = resolved_url[len("file://"):]
-        local_path = Path(os.path.expanduser(resolved_url))
+        local_path = _expand_home_path(resolved_url)
         if local_path.is_file():
             # Local file path (e.g. from platform image cache) -- skip download
             logger.info("Using local image file: %s", image_url)
@@ -1354,7 +1370,7 @@ async def video_analyze_tool(
         resolved_url = video_url
         if resolved_url.startswith("file://"):
             resolved_url = resolved_url[len("file://"):]
-        local_path = Path(os.path.expanduser(resolved_url))
+        local_path = _expand_home_path(resolved_url)
 
         if local_path.is_file():
             logger.info("Using local video file: %s", video_url)

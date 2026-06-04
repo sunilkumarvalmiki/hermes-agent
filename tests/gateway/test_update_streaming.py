@@ -9,6 +9,7 @@ Tests the new --gateway mode for hermes update, including:
 
 import json
 import os
+import sys
 import time
 import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -233,11 +234,14 @@ class TestUpdateCommandGatewayFlag:
 
         # Check the bash command string contains --gateway and PYTHONUNBUFFERED
         call_args = mock_popen.call_args[0][0]
-        cmd_string = call_args[-1] if isinstance(call_args, list) else str(call_args)
+        cmd_string = " ".join(str(part) for part in call_args) if isinstance(call_args, list) else str(call_args)
         assert "--gateway" in cmd_string
         assert "PYTHONUNBUFFERED" in cmd_string
-        assert "rc=$?" in cmd_string
-        assert "status=$?" not in cmd_string
+        if sys.platform == "win32":
+            assert "proc.wait()" in cmd_string
+        else:
+            assert "rc=$?" in cmd_string
+            assert "status=$?" not in cmd_string
         assert "stream progress" in result
 
 

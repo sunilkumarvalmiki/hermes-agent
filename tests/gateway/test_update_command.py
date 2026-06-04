@@ -5,6 +5,7 @@ the _send_update_notification startup hook (sends results after restart).
 """
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -270,9 +271,16 @@ class TestHandleUpdateCommand:
 
         # Verify setsid was used
         call_args = mock_popen.call_args[0][0]
-        assert call_args[0] == "/usr/bin/setsid"
-        assert call_args[1] == "bash"
-        assert ".update_exit_code" in call_args[-1]
+        if sys.platform == "win32":
+            call_text = " ".join(str(part) for part in call_args)
+            assert call_args[0] == sys.executable
+            assert "PYTHONUNBUFFERED" in call_text
+            assert "--gateway" in call_text
+            assert ".update_exit_code" in call_text
+        else:
+            assert call_args[0] == "/usr/bin/setsid"
+            assert call_args[1] == "bash"
+            assert ".update_exit_code" in call_args[-1]
         assert "Starting Hermes update" in result
 
     @pytest.mark.asyncio
@@ -307,12 +315,19 @@ class TestHandleUpdateCommand:
 
         # Verify plain bash -c fallback (no nohup, no setsid)
         call_args = mock_popen.call_args[0][0]
-        assert call_args[0] == "bash"
-        assert "nohup" not in call_args[2]
-        assert ".update_exit_code" in call_args[2]
-        # start_new_session=True should be in kwargs
         call_kwargs = mock_popen.call_args[1]
-        assert call_kwargs.get("start_new_session") is True
+        if sys.platform == "win32":
+            call_text = " ".join(str(part) for part in call_args)
+            assert call_args[0] == sys.executable
+            assert "PYTHONUNBUFFERED" in call_text
+            assert "--gateway" in call_text
+            assert ".update_exit_code" in call_text
+        else:
+            assert call_args[0] == "bash"
+            assert "nohup" not in call_args[2]
+            assert ".update_exit_code" in call_args[2]
+            # start_new_session=True should be in kwargs
+            assert call_kwargs.get("start_new_session") is True
         assert "Starting Hermes update" in result
 
     @pytest.mark.asyncio

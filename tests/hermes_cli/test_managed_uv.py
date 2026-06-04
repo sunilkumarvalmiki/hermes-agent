@@ -21,6 +21,10 @@ def _make_executable(path: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def _uv_binary_name() -> str:
+    return "uv.exe" if os.name == "nt" else "uv"
+
+
 # ---------------------------------------------------------------------------
 # managed_uv_path
 # ---------------------------------------------------------------------------
@@ -50,11 +54,11 @@ class TestResolveUv:
             assert resolve_uv() is None
 
     def test_existing_executable(self, tmp_path):
-        _make_executable(tmp_path / "bin" / "uv")
+        _make_executable(tmp_path / "bin" / _uv_binary_name())
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
             from hermes_cli.managed_uv import resolve_uv
             result = resolve_uv()
-            assert result == str(tmp_path / "bin" / "uv")
+            assert result == str(tmp_path / "bin" / _uv_binary_name())
 
     def test_non_executable_file_returns_none(self, tmp_path):
         uv = tmp_path / "bin" / "uv"
@@ -62,7 +66,9 @@ class TestResolveUv:
         uv.write_text("not a binary")
         # Ensure no execute bit
         uv.chmod(0o644)
-        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
+             patch("hermes_cli.managed_uv.os.access", return_value=False):
             from hermes_cli.managed_uv import resolve_uv
             assert resolve_uv() is None
 
@@ -73,24 +79,26 @@ class TestResolveUv:
 
 class TestEnsureUv:
     def test_already_installed_no_bootstrap(self, tmp_path):
-        _make_executable(tmp_path / "bin" / "uv")
+        _make_executable(tmp_path / "bin" / _uv_binary_name())
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
             from hermes_cli.managed_uv import ensure_uv
             path, fresh = ensure_uv()
-            assert path == str(tmp_path / "bin" / "uv")
+            assert path == str(tmp_path / "bin" / _uv_binary_name())
             assert fresh is False
 
     def test_installs_if_missing_sets_bootstrap_flag(self, tmp_path):
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
-             patch("hermes_cli.managed_uv._install_uv") as mock_install:
+             patch("hermes_cli.managed_uv._install_uv") as mock_install, \
+             patch("hermes_cli.managed_uv.subprocess.run") as mock_run:
             # Simulate the installer creating the binary
             def fake_install(target):
                 _make_executable(target)
             mock_install.side_effect = fake_install
+            mock_run.return_value = MagicMock(returncode=0, stdout="uv 0.1.2")
 
             from hermes_cli.managed_uv import ensure_uv
             path, fresh = ensure_uv()
-            assert path == str(tmp_path / "bin" / "uv")
+            assert path == str(tmp_path / "bin" / _uv_binary_name())
             assert fresh is True
             mock_install.assert_called_once()
 
@@ -236,27 +244,27 @@ class TestUpdateManagedUv:
             assert update_managed_uv() is None
 
     def test_self_update_success(self, tmp_path):
-        _make_executable(tmp_path / "bin" / "uv")
+        _make_executable(tmp_path / "bin" / _uv_binary_name())
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
              patch("hermes_cli.managed_uv.subprocess.run") as mock_run:
             # uv self update succeeds
             mock_run.return_value = MagicMock(returncode=0, stdout="uv 0.2.0")
             from hermes_cli.managed_uv import update_managed_uv
             result = update_managed_uv()
-            assert result == str(tmp_path / "bin" / "uv")
+            assert result == str(tmp_path / "bin" / _uv_binary_name())
             # First call is self update, second is --version
             assert mock_run.call_count == 2
-            assert mock_run.call_args_list[0][0][0] == [str(tmp_path / "bin" / "uv"), "self", "update"]
+            assert mock_run.call_args_list[0][0][0] == [str(tmp_path / "bin" / _uv_binary_name()), "self", "update"]
 
     def test_self_update_failure_non_fatal(self, tmp_path):
-        _make_executable(tmp_path / "bin" / "uv")
+        _make_executable(tmp_path / "bin" / _uv_binary_name())
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
              patch("hermes_cli.managed_uv.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="nope")
             from hermes_cli.managed_uv import update_managed_uv
             result = update_managed_uv()
             # Still returns the path — failure is non-fatal
-            assert result == str(tmp_path / "bin" / "uv")
+            assert result == str(tmp_path / "bin" / _uv_binary_name())
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +274,8 @@ class TestUpdateManagedUv:
 class TestInstallUvInternals:
     def test_posix_sets_uv_unmanaged_install(self, tmp_path):
         target = tmp_path / "bin" / "uv"
-        with patch("hermes_cli.managed_uv._install_uv_posix") as mock_posix:
+        with patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
+             patch("hermes_cli.managed_uv._install_uv_posix") as mock_posix:
             from hermes_cli.managed_uv import _install_uv
             _install_uv(target)
             mock_posix.assert_called_once()

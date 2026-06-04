@@ -42,7 +42,9 @@ _lock = threading.Lock()
 
 # Tool-call result shapes we can parse
 _WRITE_FILE_PATH_KEY = "path"
-_TERMINAL_PATH_REGEX = re.compile(r"(?:^|\s)(/[^\s'\"`]+|\~/[^\s'\"`]+)")
+_TERMINAL_PATH_REGEX = re.compile(
+    r"(?:^|\s)(/[^\s'\"`]+|\~/[^\s'\"`]+|[A-Za-z]:\\[^\s'\"`]+)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +87,13 @@ def _attempt_track(path_str: str, task_id: str, session_id: str) -> None:
         _record_track(task_id, session_id, p, category)
 
 
+def _looks_like_path_token(token: str) -> bool:
+    return (
+        token.startswith(("/", "~"))
+        or re.match(r"^[A-Za-z]:\\", token) is not None
+    )
+
+
 def _extract_paths_from_write_file(args: Dict[str, Any]) -> Set[str]:
     path = args.get(_WRITE_FILE_PATH_KEY)
     return {path} if isinstance(path, str) and path else set()
@@ -108,12 +117,14 @@ def _extract_paths_from_terminal(args: Dict[str, Any], result: str) -> Set[str]:
     cmd = args.get("command") or ""
     if isinstance(cmd, str) and cmd:
         # Tokenise the command — catches `touch /tmp/hermes-x/test_foo.py`
-        try:
-            for tok in shlex.split(cmd, posix=True):
-                if tok.startswith(("/", "~")):
-                    paths.add(tok)
-        except ValueError:
-            pass
+        for posix in (True, False):
+            try:
+                for tok in shlex.split(cmd, posix=posix):
+                    stripped = tok.strip("'\"")
+                    if _looks_like_path_token(stripped):
+                        paths.add(stripped)
+            except ValueError:
+                pass
     # Only scan the result text if it's a reasonable size (avoid 50KB dumps).
     if isinstance(result, str) and len(result) < 4096:
         for match in _TERMINAL_PATH_REGEX.findall(result):

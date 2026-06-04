@@ -1437,6 +1437,7 @@ class TestApprovalTimeoutIsNotConsent:
         mod._session_approved.clear()
         mod._permanent_approved.clear()
         mod._pending.clear()
+        self._session_token = mod.set_current_session_key(self.SESSION_KEY)
 
         self._saved_env = {
             k: os.environ.get(k)
@@ -1457,6 +1458,7 @@ class TestApprovalTimeoutIsNotConsent:
         from tools import approval as mod
         mod._gateway_queues.clear()
         mod._gateway_notify_cbs.clear()
+        mod.reset_current_session_key(self._session_token)
         for k, v in self._saved_env.items():
             if v is None:
                 os.environ.pop(k, None)

@@ -26,7 +26,6 @@ from hermes_cli.auth import (
     _auth_store_lock,
     _codex_access_token_is_expiring,
     _decode_jwt_claims,
-    _load_auth_store,
     _load_provider_state,
     _resolve_kimi_base_url,
     _resolve_zai_base_url,
@@ -38,6 +37,11 @@ from hermes_cli.auth import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _load_auth_store(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Read the live auth-store helper, not a stale imported alias."""
+    return auth_mod._load_auth_store(*args, **kwargs)
 
 
 def _load_config_safe() -> Optional[dict]:
