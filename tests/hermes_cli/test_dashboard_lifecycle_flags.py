@@ -23,7 +23,7 @@ def _ns(**kw):
     defaults = dict(
         port=9119, host="127.0.0.1", no_open=False, insecure=False,
         host_header_host=None,
-        tui=False, stop=False, status=False,
+        stop=False, status=False,
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
