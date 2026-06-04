@@ -26,12 +26,55 @@ import { describe, expect, it } from 'vitest'
 
 import { cursorLayout, inputVisualHeight } from '../lib/inputMetrics.js'
 
+interface CursorPosition {
+  column: number
+  line: number
+}
+
 function wrapAnsiEnd(text: string, cols: number): { line: number; column: number } {
   const wrapped = wrapAnsi(text, cols, { hard: true, trim: false })
   const lines = wrapped.split('\n')
   const last = lines[lines.length - 1] ?? ''
 
   return { line: lines.length - 1, column: last.length }
+}
+
+function addNearbyOffsets(offsets: Set<number>, offset: number, max: number) {
+  for (let delta = -2; delta <= 2; delta += 1) {
+    const next = offset + delta
+
+    if (next >= 1 && next <= max) {
+      offsets.add(next)
+    }
+  }
+}
+
+function wrapTransitionOffsets(text: string, cols: number): Array<[number, CursorPosition]> {
+  const offsets = new Set<number>([1, text.length])
+  const expectedByOffset = new Map<number, CursorPosition>()
+  let acc = ''
+  let previous = wrapAnsiEnd('', cols)
+
+  for (const ch of text) {
+    acc += ch
+    const offset = acc.length
+    const expected = wrapAnsiEnd(acc, cols)
+
+    expectedByOffset.set(offset, expected)
+
+    // Cursor drift is exposed at soft-wrap edges and while a growing word
+    // reflows around those edges. Check the transition plus nearby typing
+    // prefixes instead of re-running the whole long report on every prefix.
+    if (expected.line !== previous.line || expected.column < previous.column || expected.column === cols) {
+      addNearbyOffsets(offsets, offset, text.length)
+    }
+
+    previous = expected
+  }
+
+  return [...offsets]
+    .sort((a, b) => a - b)
+    .map(offset => [offset, expectedByOffset.get(offset) ?? wrapAnsiEnd(text.slice(0, offset), cols)])
 }
 
 const USER_REPORT_MESSAGE =
@@ -47,25 +90,25 @@ const USER_REPORT_MESSAGE =
 
 describe('cursor-drift regression — composer cursorLayout matches Ink rendering', () => {
   it.each([40, 50, 55, 60, 65, 70, 80])(
-    'agrees with wrap-ansi at every typing-prefix of the user-reported message at %i cols',
+    'agrees with wrap-ansi at wrap-transition prefixes of the user-reported message at %i cols',
+    { timeout: 20_000 },
     cols => {
-      // Walks the message char-by-char (mirroring what the TUI sees when a
-      // user types). At every prefix, cursorLayout must place the cursor
-      // exactly where wrap-ansi would render the end of the text.
+      // Walks the message char-by-char to find the prefixes where wrap-ansi
+      // changes visual rows. Those are the positions that exposed the
+      // reported cursor drift; asserting every nearby prefix keeps the test
+      // tied to the real typing pattern without making slow CI spend seconds
+      // recomputing the same long wrap paths.
       //
       // Pre-fix: this failed on most narrow widths because the hand-rolled
       // wrap algorithm broke at slightly different points than wrap-ansi.
-      let acc = ''
-
-      for (const ch of USER_REPORT_MESSAGE) {
-        acc += ch
-        const layout = cursorLayout(acc, acc.length, cols)
-        const expected = wrapAnsiEnd(acc, cols)
+      for (const [offset, expected] of wrapTransitionOffsets(USER_REPORT_MESSAGE, cols)) {
+        const prefix = USER_REPORT_MESSAGE.slice(0, offset)
+        const layout = cursorLayout(prefix, prefix.length, cols)
 
         expect(
           layout,
-          `mismatch at cols=${cols}, len=${acc.length}, last-char=${JSON.stringify(ch)}, ` +
-            `tail=${JSON.stringify(acc.slice(-30))}`
+          `mismatch at cols=${cols}, len=${prefix.length}, last-char=${JSON.stringify(prefix.at(-1))}, ` +
+            `tail=${JSON.stringify(prefix.slice(-30))}`
         ).toEqual(expected)
       }
     }

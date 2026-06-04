@@ -1,13 +1,14 @@
 import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useEffect, useState } from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { Thread } from './thread'
 
 const createdAt = new Date('2026-05-01T00:00:00.000Z')
 
 const resizeObservers = new Set<TestResizeObserver>()
+const rafTimers = new Set<number>()
 
 class TestResizeObserver {
   private target: Element | null = null
@@ -43,11 +44,64 @@ class TestResizeObserver {
   }
 }
 
-vi.stubGlobal('ResizeObserver', TestResizeObserver)
-vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
-  window.setTimeout(() => callback(performance.now()), 0)
-)
-vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id))
+const requestAnimationFrameShim = (callback: FrameRequestCallback) => {
+  installAnimationFrameShims()
+
+  const id = window.setTimeout(() => {
+    rafTimers.delete(id)
+    installAnimationFrameShims()
+    callback(performance.now())
+  }, 0)
+  rafTimers.add(id)
+  return id
+}
+
+const cancelAnimationFrameShim = (id: number) => {
+  rafTimers.delete(id)
+  window.clearTimeout(id)
+}
+
+function installGlobalShim<T extends keyof typeof globalThis>(name: T, value: (typeof globalThis)[T]) {
+  Object.defineProperty(globalThis, name, {
+    configurable: true,
+    value,
+    writable: true
+  })
+}
+
+function installWindowShim<T>(targetWindow: Window | null | undefined, name: string, value: T) {
+  if (!targetWindow) {
+    return
+  }
+
+  Object.defineProperty(targetWindow, name, {
+    configurable: true,
+    value,
+    writable: true
+  })
+}
+
+function installAnimationFrameShims() {
+  installGlobalShim('requestAnimationFrame', requestAnimationFrameShim)
+  installGlobalShim('cancelAnimationFrame', cancelAnimationFrameShim)
+  installWindowShim(window, 'requestAnimationFrame', requestAnimationFrameShim)
+  installWindowShim(window, 'cancelAnimationFrame', cancelAnimationFrameShim)
+  installWindowShim(document.defaultView, 'requestAnimationFrame', requestAnimationFrameShim)
+  installWindowShim(document.defaultView, 'cancelAnimationFrame', cancelAnimationFrameShim)
+}
+
+function installDomObserverShims() {
+  installGlobalShim('ResizeObserver', TestResizeObserver as unknown as typeof ResizeObserver)
+  installWindowShim(window, 'ResizeObserver', TestResizeObserver as unknown as typeof ResizeObserver)
+  installWindowShim(document.defaultView, 'ResizeObserver', TestResizeObserver as unknown as typeof ResizeObserver)
+}
+
+function installDomShims() {
+  installDomObserverShims()
+  installAnimationFrameShims()
+}
+
+installDomShims()
 
 Element.prototype.scrollTo = function scrollTo() {}
 
@@ -377,6 +431,16 @@ function IntroHarness() {
 
 describe('assistant-ui streaming renderer', () => {
   beforeEach(() => {
+    installDomShims()
+    resizeObservers.clear()
+  })
+
+  afterEach(() => {
+    cleanup()
+    for (const id of rafTimers) {
+      window.clearTimeout(id)
+    }
+    rafTimers.clear()
     resizeObservers.clear()
   })
 
