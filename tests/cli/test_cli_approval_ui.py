@@ -328,14 +328,15 @@ class TestCliApprovalUi:
             chat_console.return_value.print = MagicMock()
             cli._handle_background_command("/btw check weather")
 
-            deadline = time.time() + 2
-            while cli._background_tasks and time.time() < deadline:
-                time.sleep(0.01)
+            background_threads = list(cli._background_tasks.values())
+            for thread in background_threads:
+                thread.join(timeout=5)
 
         assert seen["approval"].__self__ is cli
         assert seen["approval"].__func__ is HermesCLI._approval_callback
         assert seen["sudo"].__self__ is cli
         assert seen["sudo"].__func__ is HermesCLI._sudo_password_callback
+        assert all(not thread.is_alive() for thread in background_threads)
         assert not cli._background_tasks
 
 
