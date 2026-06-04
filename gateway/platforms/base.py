@@ -1158,18 +1158,24 @@ def _env_home_path() -> Optional[Path]:
 
 
 def _expand_home_path(raw: str) -> Path:
-    """Expand ``~`` using HOME when provided, including on Windows."""
+    """Expand ``~`` using platform rules, with HOME as a sparse-env fallback."""
     text = str(raw)
     if "\x00" in text:
         raise ValueError("embedded null byte")
-    if text == "~":
-        home = os.environ.get("HOME", "").strip()
-        if home:
-            return Path(home)
     if text.startswith("~/") or text.startswith("~\\"):
+        expanded = os.path.expanduser(text)
+        if expanded != text:
+            return Path(expanded)
         home = os.environ.get("HOME", "").strip()
         if home:
             return Path(home) / text[2:]
+    if text == "~":
+        expanded = os.path.expanduser(text)
+        if expanded != text:
+            return Path(expanded)
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            return Path(home)
     return Path(os.path.expanduser(text))
 
 
@@ -1179,7 +1185,14 @@ def _expand_home_string(raw: str) -> str:
     if "\x00" in text:
         raise ValueError("embedded null byte")
     if text == "~" or text.startswith("~/") or text.startswith("~\\"):
-        return str(_expand_home_path(text))
+        expanded = os.path.expanduser(text)
+        if expanded != text:
+            return expanded
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            if text == "~":
+                return home
+            return str(Path(home) / text[2:])
     return os.path.expanduser(text)
 
 

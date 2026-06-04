@@ -56,7 +56,12 @@ def _get_platform_default_hermes_home() -> Path:
 
 def _windows_local_appdata_fallback() -> Path:
     """Return a usable Windows local-appdata base even with a sparse env."""
-    for env_name in ("USERPROFILE", "HOME"):
+    try:
+        return Path.home() / "AppData" / "Local"
+    except RuntimeError:
+        pass
+
+    for env_name in ("USERPROFILE",):
         raw = os.environ.get(env_name, "").strip()
         if raw:
             return Path(raw) / "AppData" / "Local"
@@ -66,10 +71,10 @@ def _windows_local_appdata_fallback() -> Path:
     if drive and path:
         return Path(drive + path) / "AppData" / "Local"
 
-    try:
-        return Path.home() / "AppData" / "Local"
-    except RuntimeError:
-        return Path(tempfile.gettempdir())
+    home = os.environ.get("HOME", "").strip()
+    if home:
+        return Path(home) / "AppData" / "Local"
+    return Path(tempfile.gettempdir())
 
 
 def get_hermes_home() -> Path:
