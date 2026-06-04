@@ -202,7 +202,7 @@ def test_dashboard_select_filters_use_sdk_value_change_handler():
 
     repo_root = Path(__file__).resolve().parents[2]
     bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
-    js = bundle.read_text()
+    js = bundle.read_text(encoding="utf-8")
 
     assert "function selectChangeHandler(setter)" in js
     assert "onValueChange: function (v)" in js
@@ -222,7 +222,7 @@ def test_dashboard_client_side_filtering_includes_tenant_filter():
 
     repo_root = Path(__file__).resolve().parents[2]
     bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
-    js = bundle.read_text()
+    js = bundle.read_text(encoding="utf-8")
 
     assert "if (tenantFilter && t.tenant !== tenantFilter) return false;" in js
     assert "[boardData, tenantFilter, assigneeFilter, search]" in js
@@ -238,7 +238,7 @@ def test_dashboard_initial_board_uses_backend_current_when_unpinned():
 
     repo_root = Path(__file__).resolve().parents[2]
     bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
-    js = bundle.read_text()
+    js = bundle.read_text(encoding="utf-8")
 
     assert 'useState(() => readSelectedBoard() || null)' in js
     assert "const storedBoard = readSelectedBoard();" in js
@@ -904,7 +904,10 @@ def test_ws_events_swallows_cancellation_on_shutdown(tmp_path, monkeypatch):
     # Short-circuit the auth check — this test is about the cancellation
     # path, not auth.
     import plugins.kanban.dashboard.plugin_api as pa
-    monkeypatch.setattr(pa, "_ws_upgrade_authorized", lambda ws: True)
+    async def _auth_ok(_ws):
+        return True
+
+    monkeypatch.setattr(pa, "_ensure_ws_authenticated", _auth_ok)
 
     class _FakeWS:
         def __init__(self):
@@ -1027,7 +1030,7 @@ def test_dashboard_done_actions_prompt_for_completion_summary():
     repo_root = Path(__file__).resolve().parents[2]
     bundle = (
         repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 
     assert "withCompletionSummary" in bundle
     assert "Completion summary" in bundle
@@ -1045,7 +1048,7 @@ def test_dashboard_surfaces_ready_blocked_error_inline():
     repo_root = Path(__file__).resolve().parents[2]
     bundle = (
         repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 
     # Helper that strips ``"409: {\"detail\":\"…\"}"`` down to the
     # human-readable message before it lands in any banner.
@@ -1073,7 +1076,7 @@ def test_dashboard_dependency_selects_use_value_change_handler():
     repo_root = Path(__file__).resolve().parents[2]
     bundle = (
         repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 
     parent_select = (
         'value: newParent,\n'
@@ -2193,7 +2196,9 @@ def test_board_endpoint_accepts_explicit_board_default_param(client):
 def test_dashboard_requests_default_board_explicitly():
     """Dashboard REST calls must include board=default instead of relying on server current board."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text(encoding="utf-8")
 
     assert "SDK.fetchJSON(withBoard(`${API}/config`, board))" in dist
     assert "SDK.fetchJSON(withBoard(`${API}/boards`, board))" in dist
@@ -2204,7 +2209,9 @@ def test_dashboard_search_includes_body_and_result():
     """Client-side search must match body, result, latest_summary, and summary
     so full card contents are findable."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text(encoding="utf-8")
 
     assert "t.body || \"\"" in dist
     assert "t.result || \"\"" in dist
@@ -2214,7 +2221,9 @@ def test_dashboard_search_includes_body_and_result():
 def test_dashboard_bulk_actions_include_reclaim_first():
     """Bulk action bar must expose reclaim_first checkbox and expanded status buttons."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text(encoding="utf-8")
 
     assert "reclaim_first: reclaimFirst" in dist
     assert "hermes-kanban-bulk-reclaim-first" in dist
@@ -2226,7 +2235,9 @@ def test_dashboard_bulk_actions_include_reclaim_first():
 def test_dashboard_shift_click_range_selection_exists():
     """Shift-click must trigger range selection via toggleRange."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text(encoding="utf-8")
 
     assert "function toggleRange" in dist or "const toggleRange =" in dist
     assert "props.toggleRange(t.id)" in dist or "props.toggleRange" in dist
@@ -2236,7 +2247,9 @@ def test_dashboard_shift_click_range_selection_exists():
 def test_dashboard_multi_move_bulk_exists():
     """Dragging a selected card with other selections must use /tasks/bulk."""
     repo_root = Path(__file__).resolve().parents[2]
-    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    dist = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text(encoding="utf-8")
 
     assert "onMoveSelected" in dist
     assert "props.onMoveSelected" in dist
@@ -2246,8 +2259,12 @@ def test_dashboard_multi_move_bulk_exists():
 def test_dashboard_failed_card_highlight_class_exists():
     """Partial bulk failures must highlight failing cards."""
     repo_root = Path(__file__).resolve().parents[2]
-    js = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
-    css = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css").read_text()
+    js = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text(encoding="utf-8")
+    css = (
+        repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css"
+    ).read_text(encoding="utf-8")
 
     assert "hermes-kanban-card--failed" in js
     assert "hermes-kanban-card--failed" in css

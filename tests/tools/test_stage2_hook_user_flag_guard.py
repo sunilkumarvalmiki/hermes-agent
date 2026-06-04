@@ -23,12 +23,12 @@ tests/tools/test_stage2_hook_toplevel_chown.py.
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests.tools._bash import run_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
@@ -67,21 +67,15 @@ def test_guard_present_and_mentions_remediation(path: Path) -> None:
 def _run_guard(text: str, *, cur_uid: int, hermes_uid: int = 10000) -> subprocess.CompletedProcess:
     """Run the extracted guard with `id` stubbed. Returns the completed process
     (rc 1 + stderr message when rejected, rc 0 when allowed through)."""
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash not available")
     block = _guard_block(text)
-    with tempfile.TemporaryDirectory() as d:
-        script = (
-            "set -e\n"
-            # Stub `id`: `id -u` -> cur_uid; `id -u hermes` -> hermes_uid.
-            f'id() {{ if [ "$2" = hermes ]; then echo {hermes_uid}; else echo {cur_uid}; fi; }}\n'
-            + block
-            + "\necho GUARD_PASSED\n"  # only reached when the guard allows through
-        )
-        sp = Path(d) / "h.sh"
-        sp.write_text(script)
-        return subprocess.run([bash, str(sp)], capture_output=True, text=True)
+    script = (
+        "set -e\n"
+        # Stub `id`: `id -u` -> cur_uid; `id -u hermes` -> hermes_uid.
+        f'id() {{ if [ "$2" = hermes ]; then echo {hermes_uid}; else echo {cur_uid}; fi; }}\n'
+        + block
+        + "\necho GUARD_PASSED\n"  # only reached when the guard allows through
+    )
+    return run_bash(script)
 
 
 def test_arbitrary_user_uid_is_rejected() -> None:

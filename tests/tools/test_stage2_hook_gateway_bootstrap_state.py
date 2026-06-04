@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests.tools._bash import run_bash, to_bash_path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
@@ -78,9 +78,6 @@ def _run_seed(
     None if it doesn't exist. ``chown``/``chmod`` are stubbed so the block
     runs without real root.
     """
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash not available")
     block = _seed_block(text)
 
     with tempfile.TemporaryDirectory() as d:
@@ -98,19 +95,15 @@ def _run_seed(
         )
         script = (
             "set -e\n"
-            f'HERMES_HOME="{home}"\n'
+            f'HERMES_HOME="{to_bash_path(home)}"\n'
             # Stub privilege ops — the sandbox isn't root.
             "chown() { :; }\n"
             "chmod() { :; }\n"
             + env_line
             + block
         )
-        script_path = dpath / "harness.sh"
-        script_path.write_text(script)
 
-        proc = subprocess.run(
-            [bash, str(script_path)], capture_output=True, text=True
-        )
+        proc = run_bash(script)
         assert proc.returncode == 0, proc.stderr
 
         if not state_file.exists():

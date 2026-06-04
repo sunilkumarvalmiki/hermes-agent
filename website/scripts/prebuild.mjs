@@ -16,7 +16,7 @@
 // several minutes and burns GitHub API quota — but still gets the same
 // 2000+ external skills the deployed site has.
 //
-// If python3 or its deps (pyyaml) aren't available on the local machine, we
+// If Python or its deps (pyyaml) aren't available on the local machine, we
 // fall back to writing an empty skills.json so `npm run build` still
 // succeeds — the Skills Hub page just shows an empty state, and llms.txt
 // generation is skipped. CI always has the deps installed, so production
@@ -37,6 +37,28 @@ const UNIFIED_INDEX_URL =
   "https://hermes-agent.nousresearch.com/docs/api/skills-index.json";
 const UNIFIED_INDEX_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 
+function pythonCandidates() {
+  return [
+    ...(process.env.PYTHON ? [{ command: process.env.PYTHON, args: [] }] : []),
+    { command: "python3", args: [] },
+    { command: "py", args: ["-3"] },
+    { command: "python", args: [] },
+  ];
+}
+
+function resolvePython() {
+  for (const candidate of pythonCandidates()) {
+    const r = spawnSync(candidate.command, [...candidate.args, "--version"], {
+      stdio: "ignore",
+      cwd: websiteDir,
+    });
+    if (r.status === 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 function writeEmptyFallback(reason) {
   mkdirSync(dirname(outputFile), { recursive: true });
   writeFileSync(outputFile, "[]\n");
@@ -51,11 +73,15 @@ function runPython(script, label) {
     console.warn(`[prebuild] ${label} skipped (script missing)`);
     return false;
   }
-  const r = spawnSync("python3", [script], { stdio: "inherit", cwd: websiteDir });
-  if (r.error && r.error.code === "ENOENT") {
-    console.warn(`[prebuild] ${label} skipped (python3 not found)`);
+  const python = resolvePython();
+  if (!python) {
+    console.warn(`[prebuild] ${label} skipped (python not found)`);
     return false;
   }
+  const r = spawnSync(python.command, [...python.args, script], {
+    stdio: "inherit",
+    cwd: websiteDir,
+  });
   if (r.status !== 0) {
     console.warn(`[prebuild] ${label} exited with status ${r.status}`);
     return false;
@@ -125,14 +151,17 @@ await ensureUnifiedIndex();
 if (!existsSync(extractScript)) {
   writeEmptyFallback("extract script missing");
 } else {
-  const r = spawnSync("python3", [extractScript], {
-    stdio: "inherit",
-    cwd: websiteDir,
-  });
-  if (r.error && r.error.code === "ENOENT") {
-    writeEmptyFallback("python3 not found");
-  } else if (r.status !== 0) {
-    writeEmptyFallback(`extract-skills.py exited with status ${r.status}`);
+  const python = resolvePython();
+  if (!python) {
+    writeEmptyFallback("python not found");
+  } else {
+    const r = spawnSync(python.command, [...python.args, extractScript], {
+      stdio: "inherit",
+      cwd: websiteDir,
+    });
+    if (r.status !== 0) {
+      writeEmptyFallback(`extract-skills.py exited with status ${r.status}`);
+    }
   }
 }
 

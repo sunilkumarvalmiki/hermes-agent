@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.tools._bash import run_bash, to_bash_path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
@@ -78,9 +78,6 @@ def _run_loop(text: str, present_files: list[str]) -> list[str]:
     """Run the extracted chown loop in a sandbox $HERMES_HOME, with `chown`
     stubbed to record which paths it was asked to touch. Returns the basenames
     the loop attempted to chown."""
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash not available")
     block = _toplevel_chown_loop(text)
 
     import tempfile
@@ -97,19 +94,17 @@ def _run_loop(text: str, present_files: list[str]) -> list[str]:
         # Stub chown to record the basename of its last argument (the path),
         # so we observe exactly which files the allowlist loop selected
         # without needing real root privileges.
+        log = dpath / "chown.log"
         script = (
             "set -e\n"
-            f'HERMES_HOME="{home}"\n'
-            f'chown() {{ for a in "$@"; do :; done; echo "${{a##*/}}" >> "{dpath}/chown.log"; }}\n'
+            f'HERMES_HOME="{to_bash_path(home)}"\n'
+            f'chown() {{ for a in "$@"; do :; done; echo "${{a##*/}}" >> "{to_bash_path(log)}"; }}\n'
             + block
         )
-        script_path = dpath / "harness.sh"
-        script_path.write_text(script)
 
-        proc = subprocess.run([bash, str(script_path)], capture_output=True, text=True)
+        proc = run_bash(script)
         assert proc.returncode == 0, proc.stderr
 
-        log = dpath / "chown.log"
         if not log.exists():
             return []
         return [ln for ln in log.read_text().splitlines() if ln]

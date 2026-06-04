@@ -15,11 +15,11 @@ by the Dockerfile.  This test targets the post-rework location.
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.tools._bash import run_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
@@ -54,16 +54,11 @@ def test_stage2_hook_resolves_puid_pgid_aliases(stage2_text: str) -> None:
 def _resolve(stage2_text: str, env: dict[str, str]) -> str:
     """Run the stage2 hook's alias-resolution lines in isolation and report the
     resolved ``HERMES_UID:HERMES_GID`` pair."""
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash not available")
     script = "\n".join(_alias_lines(stage2_text))
     script += '\necho "${HERMES_UID:-}:${HERMES_GID:-}"\n'
-    proc = subprocess.run(
-        [bash, "-ec", script],
+    proc = run_bash(
+        script,
         env={"PATH": os.environ.get("PATH", "")} | env,
-        capture_output=True,
-        text=True,
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()

@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.tools._bash import run_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
@@ -33,15 +33,10 @@ def _uid_gid_validator(text: str) -> str:
 
 
 def _validate_uid_gid(text: str, value: str) -> bool:
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash not available")
     script = _uid_gid_validator(text) + '\nvalidate_uid_gid "$CANDIDATE"\n'
-    proc = subprocess.run(
-        [bash, "-c", script],
+    proc = run_bash(
+        script,
         env={"PATH": os.environ.get("PATH", ""), "CANDIDATE": value},
-        capture_output=True,
-        text=True,
     )
     return proc.returncode == 0
 

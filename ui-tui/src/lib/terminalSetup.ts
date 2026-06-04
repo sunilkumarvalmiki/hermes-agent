@@ -1,6 +1,6 @@
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 
 export type SupportedTerminal = 'cursor' | 'vscode' | 'windsurf'
 
@@ -33,6 +33,8 @@ const TERMINAL_META: Record<SupportedTerminal, { appName: string; label: string 
   cursor: { appName: 'Cursor', label: 'Cursor' },
   windsurf: { appName: 'Windsurf', label: 'Windsurf' }
 }
+
+const pathJoinForPlatform = (platform: NodeJS.Platform): typeof join => (platform === 'win32' ? win32.join : posix.join)
 
 const MAC_COPY_BINDING: Keybinding = {
   key: 'cmd+c',
@@ -164,15 +166,17 @@ export function getVSCodeStyleConfigDir(
   env: NodeJS.ProcessEnv = process.env,
   homeDir: string = homedir()
 ): null | string {
+  const pathJoin = pathJoinForPlatform(platform)
+
   if (platform === 'darwin') {
-    return join(homeDir, 'Library', 'Application Support', appName, 'User')
+    return pathJoin(homeDir, 'Library', 'Application Support', appName, 'User')
   }
 
   if (platform === 'win32') {
-    return env['APPDATA'] ? join(env['APPDATA'], appName, 'User') : null
+    return env['APPDATA'] ? pathJoin(env['APPDATA'], appName, 'User') : null
   }
 
-  return join(homeDir, '.config', appName, 'User')
+  return pathJoin(homeDir, '.config', appName, 'User')
 }
 
 function isKeybinding(value: unknown): value is Keybinding {
@@ -286,6 +290,7 @@ export async function configureTerminalKeybindings(
   const homeDir = options?.homeDir ?? homedir()
   const ops: FileOps = { ...DEFAULT_FILE_OPS, ...(options?.fileOps ?? {}) }
   const meta = TERMINAL_META[terminal]
+  const pathJoin = pathJoinForPlatform(platform)
 
   if (isRemoteShellSession(env)) {
     return {
@@ -303,7 +308,7 @@ export async function configureTerminalKeybindings(
     }
   }
 
-  const keybindingsFile = join(configDir, 'keybindings.json')
+  const keybindingsFile = pathJoin(configDir, 'keybindings.json')
 
   try {
     await ops.mkdir(configDir, { recursive: true })
@@ -421,6 +426,7 @@ export async function shouldPromptForTerminalSetup(options?: {
   const homeDir = options?.homeDir ?? homedir()
   const ops: FileOps = { ...DEFAULT_FILE_OPS, ...(options?.fileOps ?? {}) }
   const meta = TERMINAL_META[detected]
+  const pathJoin = pathJoinForPlatform(platform)
   const configDir = getVSCodeStyleConfigDir(meta.appName, platform, env, homeDir)
 
   if (!configDir) {
@@ -428,7 +434,7 @@ export async function shouldPromptForTerminalSetup(options?: {
   }
 
   try {
-    const content = await ops.readFile(join(configDir, 'keybindings.json'), 'utf8')
+    const content = await ops.readFile(pathJoin(configDir, 'keybindings.json'), 'utf8')
     const parsed: unknown = JSON.parse(stripJsonComments(content))
 
     if (!Array.isArray(parsed)) {

@@ -1,6 +1,7 @@
 """Tests for hermes_constants module."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,11 +21,17 @@ class TestGetDefaultHermesRoot:
     """Tests for get_default_hermes_root() — Docker/custom deployment awareness."""
 
     def test_no_hermes_home_returns_native(self, tmp_path, monkeypatch):
-        """When HERMES_HOME is not set, returns ~/.hermes."""
+        """When HERMES_HOME is not set, returns the platform-native home."""
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        if sys.platform == "win32":
+            local_appdata = tmp_path / "AppData" / "Local"
+            monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+            expected = local_appdata / "hermes"
+        else:
+            expected = tmp_path / ".hermes"
 
-        assert get_default_hermes_root() == tmp_path / ".hermes"
+        assert get_default_hermes_root() == expected
 
     def test_hermes_home_is_native(self, tmp_path, monkeypatch):
         """When HERMES_HOME = ~/.hermes, returns ~/.hermes."""
@@ -286,7 +293,12 @@ class TestSecureParentDir:
 
         # Create a symlink with fewer path components
         link = tmp_path / "link"
-        link.symlink_to(real_dir)
+        try:
+            link.symlink_to(real_dir)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("current Windows account cannot create symlinks")
+            raise
         link_target = link / "file.json"
 
         called_with = []

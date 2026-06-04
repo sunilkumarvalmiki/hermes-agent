@@ -21,12 +21,11 @@ tests/tools/test_stage2_hook_toplevel_chown.py.
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests.tools._bash import run_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
@@ -67,31 +66,23 @@ def _run_build_tree_block(
 ) -> bool:
     """Run the extracted build-tree block with `stat`, `id`, and `chown`
     stubbed. Returns True iff the block attempted the recursive chown."""
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash not available")
     block = _build_tree_block(text)
 
-    with tempfile.TemporaryDirectory() as d:
-        dpath = Path(d)
-        log = dpath / "chown.log"
-        # Stubs:
-        #   stat -c %u <path>  -> echo the simulated venv owner
-        #   id -u hermes       -> handled via actual_hermes_uid var below
-        #   chown ...          -> record that it fired
-        script = (
-            "set -eu\n"
-            f'INSTALL_DIR="/opt/hermes"\n'
-            f'actual_hermes_uid={hermes_uid}\n'
-            f'stat() {{ echo {venv_owner}; }}\n'
-            f'chown() {{ echo fired >> "{log}"; }}\n'
-            + block
-        )
-        script_path = dpath / "harness.sh"
-        script_path.write_text(script)
-        proc = subprocess.run([bash, str(script_path)], capture_output=True, text=True)
-        assert proc.returncode == 0, proc.stderr
-        return log.exists() and "fired" in log.read_text()
+    # Stubs:
+    #   stat -c %u <path>  -> echo the simulated venv owner
+    #   id -u hermes       -> handled via actual_hermes_uid var below
+    #   chown ...          -> record that it fired
+    script = (
+        "set -eu\n"
+        f'INSTALL_DIR="/opt/hermes"\n'
+        f"actual_hermes_uid={hermes_uid}\n"
+        f"stat() {{ echo {venv_owner}; }}\n"
+        "chown() { echo fired; }\n"
+        + block
+    )
+    proc = run_bash(script)
+    assert proc.returncode == 0, proc.stderr
+    return "fired" in proc.stdout
 
 
 def test_chown_fires_when_venv_owner_differs(stage2_text: str) -> None:
