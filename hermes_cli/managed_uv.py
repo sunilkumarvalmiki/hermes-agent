@@ -158,7 +158,7 @@ def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.11") -> b
                 pass
 
     if result.returncode == 0:
-        venv_python = venv_dir / ("Scripts" if platform.system() == "Windows" else "bin") / "python"
+        venv_python = _venv_python_path(venv_dir)
         # uv can exit 0 yet leave no usable interpreter (e.g. a half-written
         # venv). Don't report success on a venv that has no python — restore the
         # moved-aside copy so the caller can abort without losing a working env.
@@ -184,6 +184,16 @@ def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.11") -> b
         logger.warning("venv rebuild failed: %s", result.stderr)
         print(f"  ✗ venv rebuild failed: {result.stderr.strip()}")
         return False
+
+
+def _venv_python_path(venv_dir: Path) -> Path:
+    """Return the expected interpreter path for a rebuilt venv."""
+    if platform.system() != "Windows":
+        return venv_dir / "bin" / "python"
+    python_exe = venv_dir / "Scripts" / "python.exe"
+    if python_exe.exists():
+        return python_exe
+    return venv_dir / "Scripts" / "python"
 
 
 def update_managed_uv() -> Optional[str]:
