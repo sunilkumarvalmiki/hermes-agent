@@ -21,10 +21,10 @@ random per-process ``_SESSION_TOKEN`` printed at startup; the dashboard's
 own pages inject it via ``window.__HERMES_SESSION_TOKEN__`` so logged-in
 browsers don't have to handle it manually.
 
-For the ``/events`` WebSocket we still require the session token as a
-``?token=`` query parameter (browsers cannot set the ``Authorization``
-header on an upgrade request), matching the established pattern used by
-the in-browser PTY bridge in ``hermes_cli/web_server.py``.
+For the ``/events`` WebSocket we delegate to the dashboard's central
+WebSocket auth gate, so loopback tokens, gated OAuth tickets, and
+server-internal credentials are handled consistently with the core
+dashboard bridges.
 
 This means ``hermes dashboard --host 0.0.0.0`` is safe to run on a LAN:
 plugin routes are no longer an unauthenticated exception. The auth still
@@ -36,7 +36,6 @@ the port.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import os
@@ -59,51 +58,35 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# Auth helper — WebSocket only (HTTP routes live behind the dashboard's
+# Auth helper - WebSocket only (HTTP routes live behind the dashboard's
 # existing plugin gate; this is documented above).
 # ---------------------------------------------------------------------------
-
-def _check_ws_token(provided: Optional[str]) -> bool:
-    """Constant-time compare against the dashboard session token.
-
-    Imported lazily so the plugin still loads in test contexts where the
-    dashboard web_server module isn't importable (e.g. the bare-FastAPI
-    test harness).
-    """
-    if not provided:
-        return False
-    try:
-        from hermes_cli import web_server as _ws
-    except Exception:
-        # No dashboard context (tests). Accept so the tail loop is still
-        # testable; in production the dashboard module always imports
-        # cleanly because it's the caller.
-        return True
-    expected = getattr(_ws, "_SESSION_TOKEN", None)
-    if not expected:
-        return True
-    return hmac.compare_digest(str(provided), str(expected))
 
 
 async def _ensure_ws_authenticated(ws: WebSocket) -> bool:
     """Use the dashboard's central WS guard when mounted by the dashboard.
 
-    The fallback keeps the plugin's standalone tests and direct router usage
-    protected when the dashboard module is not present.
+    The shared gate accepts the correct credential for the active mode:
+    loopback session token, gated OAuth ticket, or server-internal credential.
+    The fallback keeps the plugin's standalone tests usable when the dashboard
+    module is not present.
     """
     try:
         from hermes_cli import web_server as _ws
     except Exception:
-        _ws = None
+        return True
+
     require_ws_auth = getattr(_ws, "require_dashboard_websocket_auth", None)
     if require_ws_auth is not None and hasattr(ws, "scope"):
         return bool(await require_ws_auth(ws))
 
-    token = ws.query_params.get("token")
-    if not _check_ws_token(token):
+    ws_auth_ok = getattr(_ws, "_ws_auth_ok", None)
+    if ws_auth_ok is None or ws_auth_ok(ws):
+        return True
+
+    if hasattr(ws, "close"):
         await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
-        return False
-    return True
+    return False
 
 
 def _resolve_board(board: Optional[str]) -> Optional[str]:
