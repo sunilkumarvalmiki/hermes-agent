@@ -62,23 +62,88 @@
 
 /* ---- Columns layout -------------------------------------------------- */
 
-.hermes-kanban-columns {
+.hermes-kanban-toolbar {
   display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-card) 82%, transparent);
+}
+
+.hermes-kanban-health {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--color-border) 68%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-card) 76%, transparent);
+}
+
+.hermes-kanban-health-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.6rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-muted) 55%, transparent);
+  color: var(--color-foreground);
+  font-size: 0.72rem;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.hermes-kanban-health-chip--warn {
+  border-color: color-mix(in srgb, #d4b348 70%, var(--color-border));
+  background: color-mix(in srgb, #d4b348 14%, var(--color-card));
+}
+
+.hermes-kanban-health-chip--alert {
+  border-color: color-mix(in srgb, var(--color-destructive, #d14a4a) 70%, var(--color-border));
+  background: color-mix(in srgb, var(--color-destructive, #d14a4a) 14%, var(--color-card));
+}
+
+.hermes-kanban-health-chip--ok {
+  border-color: color-mix(in srgb, #3fb97d 70%, var(--color-border));
+  background: color-mix(in srgb, #3fb97d 14%, var(--color-card));
+}
+
+.hermes-kanban-health-label {
+  color: var(--color-muted-foreground);
+}
+
+.hermes-kanban-health-value {
+  color: var(--color-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.hermes-kanban-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(18rem, min(22rem, 82vw));
   gap: 0.75rem;
   align-items: start;
   overflow-x: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 0.25rem;
 }
 
 .hermes-kanban-column {
-  flex: 0 0 280px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: color-mix(in srgb, var(--color-card) 85%, transparent);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  border-radius: 8px;
   padding: 0.5rem;
   min-height: 200px;
-  max-height: calc(100vh - 220px);
+  max-height: clamp(22rem, calc(100vh - 240px), 48rem);
   transition: border-color 120ms ease, background-color 120ms ease;
 }
 
@@ -138,6 +203,7 @@
   flex-direction: column;
   gap: 0.45rem;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding-right: 0.1rem;
   flex: 1;
   min-height: 0;
@@ -163,9 +229,11 @@
 }
 .hermes-kanban-dot-triage   { background: #b47dd6; }  /* lilac — fresh/unspecified */
 .hermes-kanban-dot-todo     { background: var(--color-muted-foreground); }
+.hermes-kanban-dot-scheduled { background: #59a6d9; }  /* sky — delayed */
 .hermes-kanban-dot-ready    { background: #d4b348; }  /* amber */
 .hermes-kanban-dot-running  { background: #3fb97d; }  /* green */
 .hermes-kanban-dot-blocked  { background: var(--color-destructive, #d14a4a); }
+.hermes-kanban-dot-review   { background: #c78b45; }  /* bronze */
 .hermes-kanban-dot-done     { background: #4a8cd1; }  /* blue */
 .hermes-kanban-dot-archived { background: var(--color-border); }
 

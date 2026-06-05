@@ -38,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sqlite3
 import time
 from dataclasses import asdict
@@ -147,7 +146,161 @@ BOARD_COLUMNS: list[str] = [
 ]
 
 
+_STATUS_META: dict[str, dict[str, Any]] = {
+    "triage": {
+        "name": "triage",
+        "label": "Triage",
+        "help": "Raw work that needs clarification or specification",
+        "manual": True,
+        "dispatchable": False,
+        "terminal": False,
+    },
+    "todo": {
+        "name": "todo",
+        "label": "Todo",
+        "help": "Waiting on dependencies, assignment, or an explicit ready move",
+        "manual": True,
+        "dispatchable": False,
+        "terminal": False,
+    },
+    "scheduled": {
+        "name": "scheduled",
+        "label": "Scheduled",
+        "help": "Paused until a time gate, operator decision, or external trigger",
+        "manual": True,
+        "dispatchable": False,
+        "terminal": False,
+    },
+    "ready": {
+        "name": "ready",
+        "label": "Ready",
+        "help": "Dependencies are satisfied; assigned cards can be claimed by the dispatcher",
+        "manual": True,
+        "dispatchable": True,
+        "terminal": False,
+    },
+    "running": {
+        "name": "running",
+        "label": "In Progress",
+        "help": "Claimed by a worker; direct moves into this state are rejected",
+        "manual": False,
+        "dispatchable": False,
+        "terminal": False,
+    },
+    "blocked": {
+        "name": "blocked",
+        "label": "Blocked",
+        "help": "Worker or operator needs input before work can continue",
+        "manual": True,
+        "dispatchable": False,
+        "terminal": False,
+    },
+    "review": {
+        "name": "review",
+        "label": "Review",
+        "help": "Worker handoff is waiting for a review agent or human reviewer",
+        "manual": True,
+        "dispatchable": True,
+        "terminal": False,
+    },
+    "done": {
+        "name": "done",
+        "label": "Done",
+        "help": "Completed work with any final result or summary attached",
+        "manual": True,
+        "dispatchable": False,
+        "terminal": True,
+    },
+    "archived": {
+        "name": "archived",
+        "label": "Archived",
+        "help": "Hidden from the active board unless archived cards are included",
+        "manual": True,
+        "dispatchable": False,
+        "terminal": True,
+    },
+}
+
+
 _CARD_SUMMARY_PREVIEW_CHARS = 200
+
+
+def _status_meta(include_archived: bool) -> list[dict[str, Any]]:
+    names = [*BOARD_COLUMNS]
+    if include_archived:
+        names.append("archived")
+    return [dict(_STATUS_META[name]) for name in names]
+
+
+def _safe_spawnable_ready(conn: sqlite3.Connection) -> bool:
+    try:
+        return bool(kanban_db.has_spawnable_ready(conn))
+    except Exception as exc:
+        log.warning("kanban health has_spawnable_ready failed: %s", exc)
+        return False
+
+
+def _safe_spawnable_review(conn: sqlite3.Connection) -> bool:
+    try:
+        return bool(kanban_db.has_spawnable_review(conn))
+    except Exception as exc:
+        log.warning("kanban health has_spawnable_review failed: %s", exc)
+        return False
+
+
+def _board_health(
+    columns: dict[str, list[dict]],
+    diagnostics_per_task: dict[str, list[dict[str, Any]]],
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    status_names = [*BOARD_COLUMNS, "archived"]
+    by_status = {name: len(columns.get(name, [])) for name in status_names}
+    visible_tasks = [task for tasks in columns.values() for task in tasks]
+    visible_ids = {task["id"] for task in visible_tasks}
+    ready_unassigned_ids = [
+        task["id"] for task in columns.get("ready", []) if not task.get("assignee")
+    ]
+    review_unassigned_ids = [
+        task["id"] for task in columns.get("review", []) if not task.get("assignee")
+    ]
+    blocked_ids = [task["id"] for task in columns.get("blocked", [])]
+    scheduled_ids = [task["id"] for task in columns.get("scheduled", [])]
+    stale_after = int(getattr(kanban_db, "DEFAULT_CLAIM_TTL_SECONDS", 15 * 60))
+    running_stale_ids = [
+        task["id"]
+        for task in columns.get("running", [])
+        if ((task.get("age") or {}).get("started_age_seconds") or 0) >= stale_after
+    ]
+    diagnostic_ids = sorted(
+        task_id for task_id in visible_ids if diagnostics_per_task.get(task_id)
+    )
+    attention_ids = sorted(
+        set(ready_unassigned_ids)
+        | set(review_unassigned_ids)
+        | set(blocked_ids)
+        | set(running_stale_ids)
+        | set(diagnostic_ids)
+    )
+    return {
+        "total": len(visible_tasks),
+        "by_status": by_status,
+        "ready_unassigned": len(ready_unassigned_ids),
+        "ready_unassigned_ids": ready_unassigned_ids,
+        "review_unassigned": len(review_unassigned_ids),
+        "review_unassigned_ids": review_unassigned_ids,
+        "scheduled": len(scheduled_ids),
+        "scheduled_ids": scheduled_ids,
+        "blocked": len(blocked_ids),
+        "blocked_ids": blocked_ids,
+        "running_stale": len(running_stale_ids),
+        "running_stale_ids": running_stale_ids,
+        "diagnostics": len(diagnostic_ids),
+        "diagnostic_task_ids": diagnostic_ids,
+        "needs_attention": len(attention_ids),
+        "needs_attention_ids": attention_ids,
+        "spawnable_ready": _safe_spawnable_ready(conn),
+        "spawnable_review": _safe_spawnable_review(conn),
+    }
 
 
 def _task_dict(
@@ -496,6 +649,8 @@ def get_board(
             "columns": [
                 {"name": name, "tasks": columns[name]} for name in columns.keys()
             ],
+            "status_meta": _status_meta(include_archived),
+            "health": _board_health(columns, diagnostics_per_task, conn),
             "tenants": tenants,
             "assignees": assignees,
             "latest_event_id": int(latest_event_id),
@@ -863,7 +1018,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     status_code=400,
                     detail="Cannot set status to 'running' directly; use the dispatcher/claim path",
                 )
-            elif s in ("todo", "triage", "scheduled"):
+            elif s in ("todo", "triage", "review"):
                 ok = _set_status_direct(conn, task_id, s)
             else:
                 raise HTTPException(status_code=400, detail=f"unknown status: {s}")
@@ -1207,7 +1362,7 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                         continue
                     elif s == "scheduled":
                         ok = kanban_db.schedule_task(conn, tid)
-                    elif s in {"todo", "triage"}:
+                    elif s in {"todo", "triage", "review"}:
                         ok = _set_status_direct(conn, tid, s)
                     else:
                         entry.update(ok=False, error=f"unknown status {s!r}")
@@ -1614,10 +1769,12 @@ def specify_task_endpoint(
     """
     board = _resolve_board(board)
     # Pin the board for the duration of this call so the specifier module
-    # (which calls ``kb.connect()`` with no args) hits the right DB.
-    prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-    try:
-        os.environ["HERMES_KANBAN_BOARD"] = board or kanban_db.DEFAULT_BOARD
+    # (which calls ``kb.connect()`` with no args) hits the right DB. Use a
+    # context-local override rather than mutating the process-global
+    # HERMES_KANBAN_BOARD env var — this endpoint runs in FastAPI's
+    # threadpool, so two concurrent requests for different boards would
+    # otherwise race on the shared env var and cross-write (issue #38323).
+    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
         # Import lazily so a missing auxiliary client at import time
         # doesn't break plugin load.
         from hermes_cli import kanban_specify  # noqa: WPS433 (intentional)
@@ -1626,11 +1783,6 @@ def specify_task_endpoint(
             task_id,
             author=(payload.author or None),
         )
-    finally:
-        if prev_env is None:
-            os.environ.pop("HERMES_KANBAN_BOARD", None)
-        else:
-            os.environ["HERMES_KANBAN_BOARD"] = prev_env
 
     return {
         "ok": bool(outcome.ok),
@@ -2227,19 +2379,16 @@ def decompose_task_endpoint(
     can take minutes on reasoning models.
     """
     board = _resolve_board(board)
-    prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-    try:
-        os.environ["HERMES_KANBAN_BOARD"] = board or kanban_db.DEFAULT_BOARD
+    # Context-local board pin (see specify endpoint above): this sync
+    # endpoint runs in FastAPI's threadpool, so mutating the process-global
+    # HERMES_KANBAN_BOARD env var would let concurrent requests for
+    # different boards race and cross-write (issue #38323).
+    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
         from hermes_cli import kanban_decompose  # noqa: WPS433 (intentional)
         outcome = kanban_decompose.decompose_task(
             task_id,
             author=(payload.author or None),
         )
-    finally:
-        if prev_env is None:
-            os.environ.pop("HERMES_KANBAN_BOARD", None)
-        else:
-            os.environ["HERMES_KANBAN_BOARD"] = prev_env
 
     return {
         "ok": bool(outcome.ok),

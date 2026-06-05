@@ -87,25 +87,29 @@
   }
 
   // Order matches BOARD_COLUMNS in plugin_api.py.
-  const COLUMN_ORDER = ["triage", "todo", "ready", "running", "blocked", "done"];
+  const COLUMN_ORDER = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"];
   // English fallback dictionaries — used when the i18n catalog is missing
   // a key, and as defaults for the get*() helpers below so callers running
   // outside any React component (where there's no `t`) still get sane text.
   const FALLBACK_COLUMN_LABEL = {
     triage: "Triage",
     todo: "Todo",
+    scheduled: "Scheduled",
     ready: "Ready",
     running: "In Progress",
     blocked: "Blocked",
+    review: "Review",
     done: "Done",
     archived: "Archived",
   };
   const FALLBACK_COLUMN_HELP = {
     triage: "Raw ideas — a specifier will flesh out the spec",
     todo: "Waiting on dependencies or unassigned",
+    scheduled: "Waiting for a time gate or external trigger",
     ready: "Dependencies satisfied; assign a profile to dispatch",
     running: "Claimed by a worker — in-flight",
     blocked: "Worker asked for human input",
+    review: "Worker handoff is waiting for a review agent or human reviewer",
     done: "Completed",
     archived: "Archived",
   };
@@ -154,9 +158,11 @@
   const COLUMN_DOT = {
     triage: "hermes-kanban-dot-triage",
     todo: "hermes-kanban-dot-todo",
+    scheduled: "hermes-kanban-dot-scheduled",
     ready: "hermes-kanban-dot-ready",
     running: "hermes-kanban-dot-running",
     blocked: "hermes-kanban-dot-blocked",
+    review: "hermes-kanban-dot-review",
     done: "hermes-kanban-dot-done",
     archived: "hermes-kanban-dot-archived",
   };
@@ -710,10 +716,10 @@
       setFailedIds(new Set());
     }, []);
     const moveSelected = useCallback(function (newStatus) {
-      const confirmMsg = DESTRUCTIVE_TRANSITIONS[newStatus];
+      const confirmMsg = getDestructiveConfirm(t, newStatus);
       if (confirmMsg && !window.confirm(confirmMsg)) return;
       if (selectedIds.size === 0) return;
-      const patch = withCompletionSummary({ status: newStatus }, selectedIds.size);
+      const patch = withCompletionSummary({ status: newStatus }, selectedIds.size, t);
       if (!patch) return;
       const ids = Array.from(selectedIds);
       // Optimistic UI: remove selected from all columns and prepend to target.
@@ -941,7 +947,7 @@
 
    const deleteTask = useCallback(function (taskId) {
      if (!window.confirm(tx(t, "trash.confirm", FALLBACK_TRASH.confirm))) return Promise.resolve();
-     return SDK.fetchJSON(`${API}/tasks/${encodeURIComponent(taskId)}`, {
+     return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(taskId)}`, board), {
        method: "DELETE",
      }).then(function () {
        loadBoard();
@@ -959,7 +965,7 @@
       const ids = Array.from(selectedIds);
       setSelectedIds(new Set());
       return Promise.all(ids.map(function (id) {
-        return SDK.fetchJSON(`${API}/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+        return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(id)}`, board), { method: "DELETE" });
       })).then(function () {
         loadBoard();
       }).catch(function (e) { setError(String(e.message || e)); });
@@ -1005,6 +1011,7 @@
           boardData,
           onOpen: setSelectedTaskId,
         }),
+        h(BoardHealthStrip, { boardData }),
         h(BoardToolbar, {
           board: boardData,
           tenantFilter, setTenantFilter,
@@ -1168,6 +1175,56 @@
               );
             }),
           )
+        : null,
+    );
+  }
+
+  function BoardHealthStrip(props) {
+    const health = props.boardData && props.boardData.health;
+    if (!health) return null;
+    const byStatus = health.by_status || {};
+    const chip = function (label, value, modifier, title) {
+      return h("span", {
+        className: modifier
+          ? `hermes-kanban-health-chip ${modifier}`
+          : "hermes-kanban-health-chip",
+        title,
+      },
+        h("span", { className: "hermes-kanban-health-label" }, label),
+        h("strong", { className: "hermes-kanban-health-value" },
+          String(value == null ? 0 : value)),
+      );
+    };
+    return h("div", {
+      className: "hermes-kanban-health",
+      title: "Board health: queue counts, blocked work, and dispatcher readiness.",
+    },
+      chip("Total", health.total, null, "Visible tasks on this board"),
+      chip("Ready", byStatus.ready || 0,
+        health.ready_unassigned ? "hermes-kanban-health-chip--warn" : null,
+        health.ready_unassigned
+          ? `${health.ready_unassigned} ready task(s) have no assignee`
+          : "Ready tasks"),
+      chip("Review", byStatus.review || 0,
+        health.review_unassigned ? "hermes-kanban-health-chip--warn" : null,
+        health.review_unassigned
+          ? `${health.review_unassigned} review task(s) have no assignee`
+          : "Review tasks"),
+      chip("Scheduled", health.scheduled || 0, null, "Paused scheduled tasks"),
+      chip("Blocked", health.blocked || 0,
+        health.blocked ? "hermes-kanban-health-chip--alert" : null,
+        "Blocked tasks"),
+      chip("Stale", health.running_stale || 0,
+        health.running_stale ? "hermes-kanban-health-chip--alert" : null,
+        "Running tasks past the claim TTL"),
+      chip("Warnings", health.diagnostics || 0,
+        health.diagnostics ? "hermes-kanban-health-chip--alert" : null,
+        "Cards with diagnostics"),
+      health.spawnable_ready
+        ? chip("Spawn", "ready", "hermes-kanban-health-chip--ok", "Ready work can be spawned")
+        : null,
+      health.spawnable_review
+        ? chip("Spawn", "review", "hermes-kanban-health-chip--ok", "Review work can be spawned")
         : null,
     );
   }
@@ -1967,7 +2024,7 @@
     const { t } = useI18n();
     const tenants = (props.board && props.board.tenants) || [];
     const assignees = (props.board && props.board.assignees) || [];
-    return h("div", { className: "flex flex-wrap items-end gap-3" },
+    return h("div", { className: "hermes-kanban-toolbar flex flex-wrap items-end gap-3" },
       h("div", { className: "flex flex-col gap-1",
                  title: "Fuzzy-match tasks by id, title, or description. Matches across all columns." },
         h(Label, { className: "text-xs text-muted-foreground" }, tx(t, "search", "Search")),
@@ -2066,6 +2123,11 @@
         size: "sm",
         title: "Move selected tasks to Ready. Ready tasks are picked up by the dispatcher on the next tick.",
       }, "→ ready"),
+      h(Button, {
+        onClick: function () { props.onApply({ status: "review" }); },
+        size: "sm",
+        title: "Move selected tasks to Review. Review tasks can be claimed by the review dispatcher path.",
+      }, "→ review"),
       h(Button, {
         onClick: function () { props.onApply({ status: "blocked" },
           `Block ${props.count} task(s)?`); },
@@ -3797,6 +3859,7 @@
         decomposeButton,
         b("→ triage",  { status: "triage" },   task.status !== "triage"),
         b("→ ready",   { status: "ready" },    task.status !== "ready"),
+        b("→ review",  { status: "review" },   task.status !== "review"),
         // No direct → running button: /tasks/:id PATCH rejects status=running
         // with 400 (issue #19535). Tasks enter running only through the
         // dispatcher's claim_task path, which atomically creates the run row,

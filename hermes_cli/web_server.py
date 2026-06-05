@@ -30,6 +30,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -58,6 +59,7 @@ from hermes_cli.config import (
     recommended_update_command_for_method,
     redact_key,
 )
+from hermes_cli._subprocess_compat import windows_detach_flags
 from gateway.status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
 
@@ -1245,10 +1247,7 @@ def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
         "env": {**os.environ, "HERMES_NONINTERACTIVE": "1"},
     }
     if sys.platform == "win32":
-        popen_kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-        )
+        popen_kwargs["creationflags"] = windows_detach_flags()
     else:
         popen_kwargs["start_new_session"] = True
 
@@ -1683,14 +1682,15 @@ async def get_sessions(
 
 @app.get("/api/sessions/search")
 async def search_sessions(q: str = "", limit: int = 20):
-    """Full-text search across session message content using FTS5.
+    """Search sessions by ID plus full-text message content using FTS5.
 
-    Results are deduped by compression lineage, not by raw ``session_id``.
-    Auto-compression rotates a conversation onto a fresh session id (and leaves
-    the old segment's messages in the FTS index), so one logical chat can own
-    many ``sessions`` rows that all match the same query. Branches also use
-    ``parent_session_id``, but they are real alternate conversations; don't
-    collapse branch-specific hits back into the parent.
+    Direct session-id matches are surfaced first, then FTS message-content
+    matches. Results are deduped by compression lineage, not by raw
+    ``session_id``. Auto-compression rotates a conversation onto a fresh
+    session id (and leaves the old segment's messages in the FTS index), so one
+    logical chat can own many ``sessions`` rows that all match the same query.
+    Branches also use ``parent_session_id``, but they are real alternate
+    conversations; don't collapse branch-specific hits back into the parent.
     """
     if not q or not q.strip():
         return {"results": []}
@@ -1698,21 +1698,7 @@ async def search_sessions(q: str = "", limit: int = 20):
         from hermes_state import SessionDB
         db = SessionDB()
         try:
-            # Auto-add prefix wildcards so partial words match
-            # e.g. "nimb" → "nimb*" matches "nimby"
-            # Preserve quoted phrases and existing wildcards as-is
-            import re
-            terms = []
-            for token in re.findall(r'"[^"]*"|\S+', q.strip()):
-                if token.startswith('"') or token.endswith("*"):
-                    terms.append(token)
-                else:
-                    terms.append(token + "*")
-            prefix_query = " ".join(terms)
-            # Over-fetch so lineage dedup can still surface `limit` distinct
-            # conversations even when several hits collapse onto one root.
-            fetch_limit = max(limit * 5, 50)
-            matches = db.search_messages(query=prefix_query, limit=fetch_limit)
+            safe_limit = max(1, min(int(limit or 20), 100))
 
             # Walk parent_session_id to the compression root, memoized so a
             # chain of compression segments only costs one walk. We deliberately
@@ -1784,24 +1770,71 @@ async def search_sessions(q: str = "", limit: int = 20):
                 tip_cache[root_id] = tip
                 return tip
 
-            # Keep the best (first / most relevant) hit per compression root.
+            # Both ID matches and content matches share one keyspace, keyed by
+            # compression lineage root, so an id-hit and a content-hit on the
+            # same logical conversation collapse to a single result. The first
+            # hit for a lineage wins; ID matches run first and take priority.
             seen: dict = {}
-            for m in matches:
-                raw_sid = m["session_id"]
+
+            def add_lineage_result(raw_sid: str, payload: dict) -> None:
+                if not raw_sid:
+                    return
                 root = compression_root(raw_sid)
-                if root in seen:
-                    continue
-                seen[root] = {
-                    "session_id": lineage_tip(root),
-                    "lineage_root": root,
-                    "snippet": m.get("snippet", ""),
-                    "role": m.get("role"),
-                    "source": m.get("source"),
-                    "model": m.get("model"),
-                    "session_started": m.get("session_started"),
-                }
-                if len(seen) >= limit:
+                if root in seen or len(seen) >= safe_limit:
+                    return
+                payload = dict(payload)
+                payload["session_id"] = lineage_tip(root)
+                payload["lineage_root"] = root
+                seen[root] = payload
+
+            # Direct ID matches first: users often paste a session id from CLI,
+            # logs, or another Hermes surface. FTS can't find those unless the
+            # id happens to appear in message text. search_sessions_by_id is
+            # SQL-bounded, so this stays cheap even with thousands of sessions.
+            for row in db.search_sessions_by_id(q, limit=safe_limit, include_archived=True):
+                sid = row.get("id")
+                preview = (row.get("preview") or "").strip()
+                snippet = preview or f"Session ID: {sid}"
+                add_lineage_result(
+                    sid,
+                    {
+                        "snippet": snippet,
+                        "role": None,
+                        "source": row.get("source"),
+                        "model": row.get("model"),
+                        "session_started": row.get("started_at"),
+                    },
+                )
+
+            # Auto-add prefix wildcards so partial words match
+            # e.g. "nimb" → "nimb*" matches "nimby"
+            # Preserve quoted phrases and existing wildcards as-is
+            import re
+            terms = []
+            for token in re.findall(r'"[^"]*"|\S+', q.strip()):
+                if token.startswith('"') or token.endswith("*"):
+                    terms.append(token)
+                else:
+                    terms.append(token + "*")
+            prefix_query = " ".join(terms)
+            # Over-fetch so lineage dedup can still surface `limit` distinct
+            # conversations even when several hits collapse onto one root.
+            fetch_limit = max(safe_limit * 5, 50)
+            matches = db.search_messages(query=prefix_query, limit=fetch_limit)
+
+            for m in matches:
+                if len(seen) >= safe_limit:
                     break
+                add_lineage_result(
+                    m["session_id"],
+                    {
+                        "snippet": m.get("snippet", ""),
+                        "role": m.get("role"),
+                        "source": m.get("source"),
+                        "model": m.get("model"),
+                        "session_started": m.get("session_started"),
+                    },
+                )
             return {"results": list(seen.values())}
         finally:
             db.close()
@@ -4784,6 +4817,106 @@ async def delete_session_endpoint(session_id: str):
         if not db.delete_session(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
         return {"ok": True}
+    finally:
+        db.close()
+
+
+class WebChatMessage(BaseModel):
+    message: str
+
+
+def _new_web_chat_session_id() -> str:
+    return f"web-chat-{uuid.uuid4().hex}"
+
+
+def _run_web_chat_turn(
+    session_id: str,
+    message: str,
+    conversation_history: list[dict],
+) -> dict[str, Any]:
+    from run_agent import AIAgent
+
+    agent = AIAgent(
+        session_id=session_id,
+        platform="web_chat",
+    )
+    result = agent.run_conversation(
+        user_message=message,
+        conversation_history=conversation_history,
+    )
+    return result if isinstance(result, dict) else {"final_response": str(result)}
+
+
+def _message_was_persisted(messages: list[dict], role: str, content: str) -> bool:
+    for msg in reversed(messages):
+        if msg.get("role") == role and (msg.get("content") or "") == content:
+            return True
+    return False
+
+
+def _assistant_text_from_result(result: dict[str, Any]) -> str:
+    final = result.get("final_response")
+    if final is None:
+        final = result.get("response")
+    if final is None:
+        final = result.get("content")
+    return "" if final is None else str(final)
+
+
+@app.post("/api/chat/sessions")
+async def create_web_chat_session():
+    from hermes_state import SessionDB
+
+    session_id = _new_web_chat_session_id()
+    db = SessionDB()
+    try:
+        db.create_session(session_id=session_id, source="web_chat")
+        return {"session_id": session_id}
+    finally:
+        db.close()
+
+
+@app.post("/api/chat/sessions/{session_id}/messages")
+async def submit_web_chat_message(session_id: str, body: WebChatMessage):
+    from hermes_state import SessionDB
+
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    db = SessionDB()
+    try:
+        if db.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+        conversation_history = db.get_messages_as_conversation(session_id)
+    finally:
+        db.close()
+
+    result = await asyncio.to_thread(
+        _run_web_chat_turn,
+        session_id,
+        message,
+        conversation_history,
+    )
+    assistant_message = _assistant_text_from_result(result)
+
+    db = SessionDB()
+    try:
+        messages = db.get_messages(session_id)
+        if not _message_was_persisted(messages, "user", message):
+            db.append_message(session_id=session_id, role="user", content=message)
+        if assistant_message and not _message_was_persisted(messages, "assistant", assistant_message):
+            db.append_message(
+                session_id=session_id,
+                role="assistant",
+                content=assistant_message,
+            )
+        messages = db.get_messages(session_id)
+        return {
+            "session_id": session_id,
+            "assistant_message": assistant_message,
+            "messages": messages,
+        }
     finally:
         db.close()
 

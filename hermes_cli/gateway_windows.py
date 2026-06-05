@@ -284,6 +284,12 @@ def get_task_script_path() -> Path:
     return script_dir / f"{_sanitize_filename(get_task_name())}.cmd"
 
 
+def get_task_launcher_path() -> Path:
+    """Hidden Scheduled Task launcher for the generated gateway command script."""
+    _assert_windows()
+    return get_task_script_path().with_suffix(".vbs")
+
+
 def _startup_dir() -> Path:
     appdata = os.environ.get("APPDATA", "").strip()
     if appdata:
@@ -391,6 +397,21 @@ def _build_startup_launcher(script_path: Path) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
+def _vbs_string_literal(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _build_task_launcher(script_path: Path) -> str:
+    """VBScript wrapper that lets Scheduled Tasks run gateway.cmd hidden."""
+    quoted_cmd = f'"{script_path}"'
+    lines = [
+        "' " + _TASK_DESCRIPTION,
+        'Set shell = CreateObject("WScript.Shell")',
+        f"shell.Run {_vbs_string_literal(quoted_cmd)}, 0, True",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
 def _write_task_script() -> Path:
     """Generate and write the gateway.cmd wrapper. Return its absolute path."""
     _assert_windows()
@@ -415,6 +436,15 @@ def _write_task_script() -> Path:
     return script_path
 
 
+def _write_task_launcher(script_path: Path) -> Path:
+    """Generate and write the hidden Scheduled Task launcher."""
+    launcher_path = get_task_launcher_path()
+    tmp = launcher_path.with_suffix(".tmp")
+    tmp.write_text(_build_task_launcher(script_path), encoding="utf-8", newline="")
+    tmp.replace(launcher_path)
+    return launcher_path
+
+
 # ---------------------------------------------------------------------------
 # Install / uninstall
 # ---------------------------------------------------------------------------
@@ -430,7 +460,7 @@ def _resolve_task_user() -> str | None:
     return f"{domain}\\{username}" if domain else username
 
 
-def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, str]:
+def _install_scheduled_task(task_name: str, launcher_path: Path) -> tuple[bool, str]:
     """Create or replace the Scheduled Task. Returns (success, detail).
 
     Always recreate instead of ``/Change``. Older Hermes builds and failed
@@ -438,7 +468,8 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
     preserves those stale triggers and can make the gateway relaunch every
     minute. Delete+create gives us a clean ONLOGON task every install.
     """
-    quoted_script = _quote_schtasks_arg(str(script_path))
+    action = f"wscript.exe //B //NoLogo {_quote_cmd_script_arg(str(launcher_path))}"
+    quoted_script = _quote_schtasks_arg(action)
 
     delete_code, delete_out, delete_err = _exec_schtasks(["/Delete", "/F", "/TN", task_name])
     delete_detail = (delete_err or delete_out or "").strip()
@@ -763,6 +794,7 @@ def install(
 
     task_name = get_task_name()
     script_path = _write_task_script()
+    launcher_path = _write_task_launcher(script_path)
 
     # On machines where the current user's scheduled-task ACL is locked down,
     # schtasks /Create or /Change can sit for the timeout before returning
@@ -787,9 +819,10 @@ def install(
         _install_startup_fallback(script_path, start_now, "administrator approval was not used")
         return
 
-    ok, detail = _install_scheduled_task(task_name, script_path)
+    ok, detail = _install_scheduled_task(task_name, launcher_path)
     if ok:
         print(f"✓ {detail}")
+        print(f"  Task launcher: {launcher_path}")
         print(f"  Task script: {script_path}")
         print("ℹ Gateway auto-start installed for Windows login.")
         if start_now:
@@ -901,6 +934,7 @@ def uninstall() -> None:
     _assert_windows()
     task_name = get_task_name()
     script_path = get_task_script_path()
+    launcher_path = get_task_launcher_path()
     startup_entry = get_startup_entry_path()
 
     scheduled_task_removed = False
@@ -926,7 +960,11 @@ def uninstall() -> None:
         else:
             print(f"⚠ schtasks /Delete returned code {code}: {detail}")
 
-    for path, label in [(startup_entry, "Windows login item"), (script_path, "Task script")]:
+    for path, label in [
+        (startup_entry, "Windows login item"),
+        (launcher_path, "Task launcher"),
+        (script_path, "Task script"),
+    ]:
         try:
             path.unlink()
             print(f"✓ Removed {label}: {path}")

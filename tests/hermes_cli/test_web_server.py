@@ -374,6 +374,62 @@ class TestWebServerEndpoints:
         resp = self.client.patch("/api/sessions/does-not-exist", json={"title": "x"})
         assert resp.status_code == 404
 
+    def test_create_web_chat_session(self):
+        from hermes_state import SessionDB
+
+        resp = self.client.post("/api/chat/sessions")
+        assert resp.status_code == 200
+
+        session_id = resp.json()["session_id"]
+        assert session_id.startswith("web-chat-")
+
+        db = SessionDB()
+        try:
+            row = db.get_session(session_id)
+            assert row is not None
+            assert row["source"] == "web_chat"
+        finally:
+            db.close()
+
+    def test_web_chat_message_runs_agent_and_returns_messages(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session("web-chat-test", source="web_chat")
+        finally:
+            db.close()
+
+        def fake_run(session_id, message, conversation_history):
+            assert session_id == "web-chat-test"
+            assert message == "hello Hermes"
+            assert conversation_history == []
+            return {"final_response": "hello from web chat"}
+
+        monkeypatch.setattr(web_server, "_run_web_chat_turn", fake_run)
+
+        resp = self.client.post(
+            "/api/chat/sessions/web-chat-test/messages",
+            json={"message": "hello Hermes"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id"] == "web-chat-test"
+        assert data["assistant_message"] == "hello from web chat"
+        assert [m["role"] for m in data["messages"]] == ["user", "assistant"]
+        assert [m["content"] for m in data["messages"]] == [
+            "hello Hermes",
+            "hello from web chat",
+        ]
+
+    def test_web_chat_message_rejects_empty_message(self):
+        resp = self.client.post(
+            "/api/chat/sessions/web-chat-test/messages",
+            json={"message": "   "},
+        )
+        assert resp.status_code == 400
+
     def test_archive_session_via_patch(self):
         """PATCH archived=true soft-hides a session; archived=false restores it."""
         from hermes_state import SessionDB
@@ -716,6 +772,37 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json() == {"ok": True, "pid": 12345, "name": "hermes-update"}
         assert calls == [(["update"], "hermes-update")]
+
+    def test_spawn_hermes_action_hides_windows_console(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        class Proc:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        captured = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return Proc()
+
+        monkeypatch.setattr(web_server.sys, "platform", "win32")
+        monkeypatch.setattr(web_server, "windows_detach_flags", lambda: 0x08000208)
+        monkeypatch.setattr(web_server.subprocess, "Popen", fake_popen)
+        web_server._ACTION_PROCS.pop("doctor", None)
+        web_server._ACTION_RESULTS.pop("doctor", None)
+
+        proc = web_server._spawn_hermes_action(["doctor"], "doctor")
+
+        assert proc.pid == 12345
+        flags = captured["kwargs"]["creationflags"]
+        assert flags & 0x00000200, "missing CREATE_NEW_PROCESS_GROUP"
+        assert flags & 0x00000008, "missing DETACHED_PROCESS"
+        assert flags & 0x08000000, "missing CREATE_NO_WINDOW"
+        assert "start_new_session" not in captured["kwargs"]
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
@@ -4097,4 +4184,3 @@ class TestValidateProviderCredential:
     def test_empty_value_rejected(self):
         data = self._post("OPENAI_API_KEY", "   ").json()
         assert data["ok"] is False
-

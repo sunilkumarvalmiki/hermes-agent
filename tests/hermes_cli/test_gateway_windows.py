@@ -150,8 +150,33 @@ def test_write_task_script_anchors_cmd_cd_at_hermes_home(monkeypatch, tmp_path):
     assert f"cd /d {gateway_windows._quote_cmd_script_arg(str(project))}" not in content
 
 
+def test_task_launcher_runs_gateway_cmd_hidden_and_waits(tmp_path):
+    script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+
+    content = gateway_windows._build_task_launcher(script_path)
+
+    assert 'Set shell = CreateObject("WScript.Shell")' in content
+    assert f'"""{script_path}"""' in content
+    assert ", 0, True" in content
+
+
+def test_write_task_launcher_sits_next_to_task_script(monkeypatch, tmp_path):
+    script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    launcher_path = tmp_path / "Hermes_Gateway_alice.vbs"
+
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "get_task_launcher_path", lambda: launcher_path)
+
+    written = gateway_windows._write_task_launcher(script_path)
+
+    assert written == launcher_path
+    assert launcher_path.exists()
+    assert f'"""{script_path}"""' in launcher_path.read_text(encoding="utf-8")
+
+
 def _arrange_startup_fallback(monkeypatch, tmp_path, running_pids):
     script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    launcher_path = tmp_path / "Hermes_Gateway_alice.vbs"
     startup_entry = tmp_path / "Startup" / "Hermes_Gateway_alice.cmd"
     calls = []
 
@@ -159,10 +184,11 @@ def _arrange_startup_fallback(monkeypatch, tmp_path, running_pids):
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
     monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
     monkeypatch.setattr(gateway_windows, "_write_task_script", lambda: script_path)
+    monkeypatch.setattr(gateway_windows, "_write_task_launcher", lambda path: launcher_path)
     monkeypatch.setattr(
         gateway_windows,
         "_install_scheduled_task",
-        lambda task_name, script_path: (
+        lambda task_name, task_path: (
             False,
             "schtasks /Create failed (code 1): ERROR: Access is denied.",
         ),
@@ -238,7 +264,7 @@ def test_elevated_gateway_command_uses_pythonw_hidden_console(monkeypatch):
 def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_path):
     """Install must delete+create so stale minute-repeat task settings are not preserved."""
     calls = []
-    script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    launcher_path = tmp_path / "Hermes_Gateway_alice.vbs"
 
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
 
@@ -251,7 +277,7 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
         raise AssertionError(f"unexpected schtasks args: {args}")
 
     monkeypatch.setattr(gateway_windows, "_exec_schtasks", fake_schtasks)
-    ok, detail = gateway_windows._install_scheduled_task("Hermes_Gateway_alice", script_path)
+    ok, detail = gateway_windows._install_scheduled_task("Hermes_Gateway_alice", launcher_path)
 
     assert ok is True
     assert "/Change" not in [arg for call in calls for arg in call]
@@ -259,11 +285,17 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
     assert calls[1][0] == "/Create"
     assert "/SC" in calls[1]
     assert "ONLOGON" in calls[1]
+    action = calls[1][calls[1].index("/TR") + 1]
+    assert "wscript.exe" in action
+    assert "//B" in action
+    assert "//NoLogo" in action
+    assert "Hermes_Gateway_alice.vbs" in action
 
 
 def test_install_scheduled_task_success_start_now_uses_direct_spawn_not_task_run(monkeypatch, tmp_path, capsys):
     """Install start-now should not /Run the task; that preserved old restart loops."""
     script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    launcher_path = tmp_path / "Hermes_Gateway_alice.vbs"
     calls = []
 
     monkeypatch.setattr(gateway_windows, "_prompt_install_choices", lambda *args, **kwargs: (True, True))
@@ -271,10 +303,11 @@ def test_install_scheduled_task_success_start_now_uses_direct_spawn_not_task_run
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
     monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
     monkeypatch.setattr(gateway_windows, "_write_task_script", lambda: script_path)
+    monkeypatch.setattr(gateway_windows, "_write_task_launcher", lambda path: launcher_path)
     monkeypatch.setattr(
         gateway_windows,
         "_install_scheduled_task",
-        lambda task_name, script_path: (True, "Created Scheduled Task 'Hermes_Gateway_alice'"),
+        lambda task_name, task_path: (True, "Created Scheduled Task 'Hermes_Gateway_alice'"),
     )
     monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [])
     monkeypatch.setattr(gateway_windows, "_exec_schtasks", lambda args: calls.append(("schtasks", tuple(args))) or (0, "", ""))
@@ -294,6 +327,7 @@ def test_install_scheduled_task_success_start_now_uses_direct_spawn_not_task_run
 def test_install_scheduled_task_success_does_not_auto_start(monkeypatch, tmp_path, capsys):
     """Install should register/update the task only; start is explicit."""
     script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    launcher_path = tmp_path / "Hermes_Gateway_alice.vbs"
     calls = []
 
     monkeypatch.setattr(gateway_windows, "_prompt_install_choices", lambda *args, **kwargs: (False, True))
@@ -301,10 +335,11 @@ def test_install_scheduled_task_success_does_not_auto_start(monkeypatch, tmp_pat
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
     monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
     monkeypatch.setattr(gateway_windows, "_write_task_script", lambda: script_path)
+    monkeypatch.setattr(gateway_windows, "_write_task_launcher", lambda path: launcher_path)
     monkeypatch.setattr(
         gateway_windows,
         "_install_scheduled_task",
-        lambda task_name, script_path: (True, "Created Scheduled Task 'Hermes_Gateway_alice'"),
+        lambda task_name, task_path: (True, "Created Scheduled Task 'Hermes_Gateway_alice'"),
     )
     monkeypatch.setattr(gateway_windows, "_exec_schtasks", lambda args: calls.append(("schtasks", tuple(args))) or (0, "", ""))
     monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda path=None: calls.append(("spawn", path)) or 12345)
@@ -324,16 +359,18 @@ def test_install_scheduled_task_success_does_not_auto_start(monkeypatch, tmp_pat
 def test_install_access_denied_launches_elevated_install_before_startup_fallback(monkeypatch, tmp_path, capsys):
     """Non-admin Scheduled Task access denied should hand off to UAC elevation."""
     script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    launcher_path = tmp_path / "Hermes_Gateway_alice.vbs"
     calls = []
 
     monkeypatch.setattr(gateway_windows, "_prompt_install_choices", lambda *args, **kwargs: (False, True))
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
     monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
     monkeypatch.setattr(gateway_windows, "_write_task_script", lambda: script_path)
+    monkeypatch.setattr(gateway_windows, "_write_task_launcher", lambda path: launcher_path)
     monkeypatch.setattr(
         gateway_windows,
         "_install_scheduled_task",
-        lambda task_name, script_path: (
+        lambda task_name, task_path: (
             False,
             "schtasks /Create failed (code 1): ERROR: Access is denied.",
         ),
@@ -360,16 +397,18 @@ def test_install_access_denied_launches_elevated_install_before_startup_fallback
 def test_install_prompts_start_choices_before_uac(monkeypatch, tmp_path, capsys):
     """Windows install asks start-now and auto-start before any UAC handoff."""
     script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    launcher_path = tmp_path / "Hermes_Gateway_alice.vbs"
     calls = []
     answers = iter([True, True, True])
 
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
     monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
     monkeypatch.setattr(gateway_windows, "_write_task_script", lambda: script_path)
+    monkeypatch.setattr(gateway_windows, "_write_task_launcher", lambda path: launcher_path)
     monkeypatch.setattr(
         gateway_windows,
         "_install_scheduled_task",
-        lambda task_name, script_path: (
+        lambda task_name, task_path: (
             False,
             "schtasks /Create failed (code 1): ERROR: Access is denied.",
         ),
@@ -465,16 +504,18 @@ def test_install_startup_fallback_does_not_auto_spawn_when_gateway_stopped(monke
 def test_install_access_denied_declined_elevation_uses_startup_fallback(monkeypatch, tmp_path, capsys):
     """Install should ask before UAC; declining keeps the non-jarring fallback path."""
     script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    launcher_path = tmp_path / "Hermes_Gateway_alice.vbs"
     calls = []
 
     monkeypatch.setattr(gateway_windows, "_prompt_install_choices", lambda *args, **kwargs: (False, True))
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
     monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
     monkeypatch.setattr(gateway_windows, "_write_task_script", lambda: script_path)
+    monkeypatch.setattr(gateway_windows, "_write_task_launcher", lambda path: launcher_path)
     monkeypatch.setattr(
         gateway_windows,
         "_install_scheduled_task",
-        lambda task_name, script_path: (
+        lambda task_name, task_path: (
             False,
             "schtasks /Create failed (code 1): ERROR: Access is denied.",
         ),

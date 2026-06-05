@@ -109,17 +109,14 @@ const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
   label: "Chat",
-  icon: Terminal,
+  icon: MessageSquare,
 };
 
 /**
- * Built-in routes except /chat.  Chat is rendered persistently (outside
- * <Routes>) when embedded — see the persistent chat host block rendered
- * inline near the bottom of this file — so the PTY child, WebSocket,
- * and xterm instance survive when the user visits another tab and comes
- * back.  A `display:none` toggle hides the terminal without unmounting.
- * Routing still owns the URL so /chat deep-links, browser back/forward,
- * and nav highlight keep working.
+ * Built-in routes except /chat. Chat is rendered persistently outside
+ * <Routes> when embedded so the draft composer and loaded session survive
+ * when the user visits another tab and comes back. Routing still owns the URL
+ * so /chat deep-links, browser back/forward, and nav highlight keep working.
  */
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
@@ -141,10 +138,10 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/docs": DocsPage,
 };
 
-// Route placeholder for /chat.  The persistent ChatPage host (rendered
-// outside <Routes> when embedded chat is on) paints on top; this empty
-// element just claims the path so the `*` catch-all redirect doesn't
-// fire when the user navigates to /chat.
+// Route placeholder for /chat. The persistent ChatPage host is rendered
+// outside <Routes> when embedded chat is on; this empty element just claims
+// the path so the `*` catch-all redirect doesn't fire when the user navigates
+// to /chat.
 function ChatRouteSink() {
   return null;
 }
@@ -384,22 +381,15 @@ export default function App() {
   }, []);
 
   // A plugin can replace the built-in /chat page via `tab.override: "/chat"`
-  // in its manifest.  When one does, `buildRoutes` already swaps the route
-  // element for <PluginPage /> — but we also have to suppress the
-  // persistent ChatPage host below, or the plugin's page and the built-in
-  // terminal would paint on top of each other.  The override is niche
-  // (nothing ships overriding /chat today) but it's an advertised
-  // extension point, so preserve the pre-persistence contract: when a
-  // plugin owns /chat, the built-in chat UI is entirely absent.
+  // in its manifest. When one does, `buildRoutes` already swaps the route
+  // element for <PluginPage />; suppress the persistent ChatPage host below so
+  // the plugin owns the route completely.
   //
   // Waiting on `pluginsLoading` is load-bearing: manifests arrive
   // asynchronously from /api/dashboard/plugins, so on initial render
-  // `chatOverriddenByPlugin` is always false.  Without the loading
-  // gate, the persistent host would mount, spawn a PTY, and THEN get
-  // yanked out from under the user when the plugin's manifest resolves
-  // — killing the session mid-paint.  Delaying host mount by the
-  // plugin-load window (typically <50ms, worst case 2s safety timeout)
-  // is the cheaper trade-off.
+  // `chatOverriddenByPlugin` is always false. Without the loading gate, the
+  // built-in host could mount and then disappear when the plugin manifest
+  // resolves.
   const chatOverriddenByPlugin = useMemo(
     () => manifests.some((m) => m.tab.override === "/chat"),
     [manifests],

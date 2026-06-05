@@ -13,13 +13,17 @@ import time
 
 import pytest
 
-pytest.importorskip("ptyprocess", reason="ptyprocess not installed")
+if not sys.platform.startswith("win"):
+    pytest.importorskip("ptyprocess", reason="ptyprocess not installed")
 
 from hermes_cli.pty_bridge import PtyBridge, PtyUnavailableError
 
 
 skip_on_windows = pytest.mark.skipif(
     sys.platform.startswith("win"), reason="PTY bridge is POSIX-only"
+)
+windows_only = pytest.mark.skipif(
+    not sys.platform.startswith("win"), reason="Windows-only PTY bridge"
 )
 
 
@@ -233,6 +237,49 @@ class TestPtyBridgeEnv:
         try:
             output = _read_until(bridge, b"pty-env-works")
             assert b"pty-env-works" in output
+        finally:
+            bridge.close()
+
+
+@windows_only
+class TestWindowsPtyBridge:
+    def test_is_available_on_windows(self):
+        assert PtyBridge.is_available() is True
+
+    def test_reads_child_stdout(self):
+        bridge = PtyBridge.spawn(
+            [sys.executable, "-c", "print('windows-pty-ok', flush=True)"]
+        )
+        try:
+            output = _read_until(bridge, b"windows-pty-ok")
+            assert b"windows-pty-ok" in output
+        finally:
+            bridge.close()
+
+    def test_write_sends_to_child_stdin(self):
+        script = (
+            "import sys; "
+            "print('ready', flush=True); "
+            "line = sys.stdin.readline(); "
+            "print('echo:' + line.strip(), flush=True)"
+        )
+        bridge = PtyBridge.spawn([sys.executable, "-c", script])
+        try:
+            assert b"ready" in _read_until(bridge, b"ready")
+            bridge.write(b"hello-winpty\r")
+            output = _read_until(bridge, b"echo:hello-winpty")
+            assert b"echo:hello-winpty" in output
+        finally:
+            bridge.close()
+
+    def test_resize_does_not_raise(self):
+        bridge = PtyBridge.spawn(
+            [sys.executable, "-c", "import time; time.sleep(2)"],
+            cols=80,
+            rows=24,
+        )
+        try:
+            bridge.resize(cols=131072, rows=1)
         finally:
             bridge.close()
 

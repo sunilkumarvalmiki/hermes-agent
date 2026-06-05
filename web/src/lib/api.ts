@@ -287,6 +287,19 @@ export const api = {
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
+  createWebChatSession: () =>
+    fetchJSON<WebChatSessionResponse>("/api/chat/sessions", {
+      method: "POST",
+    }),
+  sendWebChatMessage: (id: string, message: string) =>
+    fetchJSON<WebChatMessageResponse>(
+      `/api/chat/sessions/${encodeURIComponent(id)}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+      },
+    ),
   getSessionLatestDescendant: (id: string) =>
     fetchJSON<SessionLatestDescendantResponse>(
       `/api/sessions/${encodeURIComponent(id)}/latest-descendant`,
@@ -1307,6 +1320,16 @@ export interface SessionMessage {
 
 export interface SessionMessagesResponse {
   session_id: string;
+  messages: SessionMessage[];
+}
+
+export interface WebChatSessionResponse {
+  session_id: string;
+}
+
+export interface WebChatMessageResponse {
+  session_id: string;
+  assistant_message: string;
   messages: SessionMessage[];
 }
 

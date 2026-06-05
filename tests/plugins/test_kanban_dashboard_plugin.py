@@ -71,12 +71,27 @@ def test_board_empty(client):
     # All canonical columns present (triage + the rest), each empty.
     names = [c["name"] for c in data["columns"]]
     assert set(names) == kb.VALID_STATUSES - {"archived"}
-    for expected in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
+    for expected in (
+        "triage",
+        "todo",
+        "scheduled",
+        "ready",
+        "running",
+        "blocked",
+        "review",
+        "done",
+    ):
         assert expected in names, f"missing column {expected}: {names}"
     assert all(len(c["tasks"]) == 0 for c in data["columns"])
     assert data["tenants"] == []
     assert data["assignees"] == []
     assert data["latest_event_id"] == 0
+    status_meta = {item["name"]: item for item in data["status_meta"]}
+    assert set(status_meta) == kb.VALID_STATUSES - {"archived"}
+    assert status_meta["scheduled"]["dispatchable"] is False
+    assert status_meta["review"]["dispatchable"] is True
+    assert data["health"]["total"] == 0
+    assert data["health"]["by_status"]["review"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +152,57 @@ def test_scheduled_tasks_have_their_own_column_not_todo(client):
     columns = {c["name"]: c["tasks"] for c in r.json()["columns"]}
     assert any(t["id"] == task["id"] for t in columns["scheduled"])
     assert not any(t["id"] == task["id"] for t in columns["todo"])
+
+
+def test_board_exposes_status_metadata_and_health(client):
+    ready = client.post("/api/plugins/kanban/tasks", json={"title": "ready"}).json()["task"]
+    scheduled = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "scheduled"},
+    ).json()["task"]
+    blocked = client.post("/api/plugins/kanban/tasks", json={"title": "blocked"}).json()["task"]
+    review = client.post("/api/plugins/kanban/tasks", json={"title": "review"}).json()["task"]
+
+    client.patch(
+        f"/api/plugins/kanban/tasks/{scheduled['id']}",
+        json={"status": "scheduled", "block_reason": "wait"},
+    )
+    client.patch(
+        f"/api/plugins/kanban/tasks/{blocked['id']}",
+        json={"status": "blocked", "block_reason": "need input"},
+    )
+
+    conn = kb.connect()
+    try:
+        conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (review["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/board")
+    assert r.status_code == 200
+    data = r.json()
+
+    status_meta = {entry["name"]: entry for entry in data["status_meta"]}
+    assert status_meta["review"]["label"] == "Review"
+    assert status_meta["review"]["dispatchable"] is True
+    assert status_meta["scheduled"]["label"] == "Scheduled"
+    assert status_meta["scheduled"]["manual"] is True
+
+    health = data["health"]
+    assert health["total"] == 4
+    assert health["by_status"]["ready"] == 1
+    assert health["by_status"]["scheduled"] == 1
+    assert health["by_status"]["blocked"] == 1
+    assert health["by_status"]["review"] == 1
+    assert health["ready_unassigned"] == 1
+    assert health["review_unassigned"] == 1
+    assert health["scheduled"] == 1
+    assert health["blocked"] == 1
+    assert health["spawnable_ready"] is False
+    assert health["spawnable_review"] is False
+    assert ready["id"] in health["ready_unassigned_ids"]
+    assert review["id"] in health["review_unassigned_ids"]
 
 
 def test_tenant_filter(client):
@@ -226,6 +292,75 @@ def test_dashboard_client_side_filtering_includes_tenant_filter():
 
     assert "if (tenantFilter && t.tenant !== tenantFilter) return false;" in js
     assert "[boardData, tenantFilter, assigneeFilter, search]" in js
+
+
+def test_dashboard_bundle_handles_scheduled_column_as_first_class_lane():
+    """Scheduled tasks returned by the backend need label/help/dot styling."""
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    css = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css"
+    js = bundle.read_text(encoding="utf-8")
+    styles = css.read_text(encoding="utf-8")
+
+    assert '"scheduled"' in js
+    assert 'scheduled: "Scheduled"' in js
+    assert "hermes-kanban-dot-scheduled" in js
+    assert ".hermes-kanban-dot-scheduled" in styles
+
+
+def test_dashboard_bundle_handles_review_column_as_first_class_lane():
+    """Review tasks returned by the backend need controls, label/help, and styling."""
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    css = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css"
+    js = bundle.read_text(encoding="utf-8")
+    styles = css.read_text(encoding="utf-8")
+
+    assert 'const COLUMN_ORDER = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"];' in js
+    assert 'review: "Review"' in js
+    assert "hermes-kanban-dot-review" in js
+    assert ".hermes-kanban-dot-review" in styles
+    assert '"→ review"' in js
+
+
+def test_dashboard_bulk_move_uses_defined_destructive_confirmation_helper():
+    """Bulk drag/drop must not crash on an undefined confirmation map."""
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    js = bundle.read_text(encoding="utf-8")
+
+    assert "DESTRUCTIVE_TRANSITIONS" not in js
+    assert "const confirmMsg = getDestructiveConfirm(t, newStatus);" in js
+    assert "withCompletionSummary({ status: newStatus }, selectedIds.size, t)" in js
+
+
+def test_dashboard_delete_calls_pin_selected_board():
+    """Delete operations must target the dashboard-selected board slug."""
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    js = bundle.read_text(encoding="utf-8")
+
+    assert "SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(taskId)}`, board), {" in js
+    assert "SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(id)}`, board), { method: \"DELETE\" })" in js
+
+
+def test_dashboard_bundle_uses_stable_workbench_layout_hooks():
+    """The redesign should keep explicit CSS hooks for robust board layout."""
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    css = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css"
+    js = bundle.read_text(encoding="utf-8")
+    styles = css.read_text(encoding="utf-8")
+
+    assert 'className: "hermes-kanban-toolbar' in js
+    assert ".hermes-kanban-toolbar" in styles
+    assert "grid-auto-flow: column" in styles
+    assert "scrollbar-gutter: stable" in styles
 
 
 def test_dashboard_initial_board_uses_backend_current_when_unpinned():
@@ -341,6 +476,20 @@ def test_patch_schedule_then_unblock(client):
     )
     assert r.status_code == 200
     assert r.json()["task"]["status"] == "ready"
+
+
+def test_patch_status_review(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={"status": "review"},
+    )
+    assert r.status_code == 200
+    assert r.json()["task"]["status"] == "review"
+
+    columns = client.get("/api/plugins/kanban/board").json()["columns"]
+    review = next(c for c in columns if c["name"] == "review")
+    assert any(x["id"] == t["id"] for x in review["tasks"])
 
 
 def test_patch_drag_drop_move_todo_to_ready(client):
@@ -969,6 +1118,25 @@ def test_bulk_status_ready(client):
     ready = next(col for col in board["columns"] if col["name"] == "ready")
     ids = {t["id"] for t in ready["tasks"]}
     assert {a["id"], b["id"], c2["id"]}.issubset(ids)
+
+
+def test_bulk_status_review(client):
+    a = client.post("/api/plugins/kanban/tasks", json={"title": "a"}).json()["task"]
+    b = client.post("/api/plugins/kanban/tasks", json={"title": "b"}).json()["task"]
+
+    r = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [a["id"], b["id"]], "status": "review"},
+    )
+
+    assert r.status_code == 200
+    results = r.json()["results"]
+    assert all(item["ok"] for item in results)
+
+    board = client.get("/api/plugins/kanban/board").json()
+    review = next(col for col in board["columns"] if col["name"] == "review")
+    ids = {t["id"] for t in review["tasks"]}
+    assert {a["id"], b["id"]}.issubset(ids)
 
 
 def test_bulk_status_done_forwards_completion_summary(client):
