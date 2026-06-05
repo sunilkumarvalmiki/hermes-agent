@@ -41,7 +41,7 @@
     "lint:fix": "eslint src/ electron/ --fix",
     "fmt": "prettier --write 'src/**/*.{ts,tsx}' 'electron/**/*.{js,cjs}' 'vite.config.ts'",
     "fix": "npm run lint:fix && npm run fmt",
-    "test:ui": "vitest run --environment jsdom --exclude \"electron/**/*.test.cjs\" --exclude \"build/**\"",
+    "test:ui": "vitest run --environment jsdom --exclude \"electron/**/*.test.cjs\" --exclude \"build/**\" --exclude \"scripts/**/*.test.cjs\"",
     "preview": "node scripts/assert-root-install.cjs && vite preview --host 127.0.0.1 --port 4174"
   },
   "dependencies": {
@@ -146,6 +146,7 @@
       "package.json"
     ],
     "beforeBuild": "scripts/before-build.cjs",
+    "beforePack": "scripts/before-pack.cjs",
     "afterPack": "scripts/after-pack.cjs",
     "extraResources": [
       {

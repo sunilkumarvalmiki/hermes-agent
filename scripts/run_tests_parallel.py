@@ -40,8 +40,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -280,18 +282,26 @@ def _run_one_file(
     """
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
     subproc_start = time.monotonic()
-    proc = subprocess.Popen(
-        cmd,
-        cwd=repo_root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        # POSIX: place the child at the head of its own process group so
-        # _kill_tree can SIGKILL the group atomically.
-        # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
-        # _kill_tree handles the Windows path via taskkill /F /T.
-        start_new_session=True,
-    )
+    env = os.environ.copy()
+    pycache_prefix = tempfile.mkdtemp(prefix="hermes-pytest-pycache-")
+    env["PYTHONPYCACHEPREFIX"] = pycache_prefix
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            # POSIX: place the child at the head of its own process group so
+            # _kill_tree can SIGKILL the group atomically.
+            # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
+            # _kill_tree handles the Windows path via taskkill /F /T.
+            start_new_session=True,
+        )
+    except BaseException:
+        shutil.rmtree(pycache_prefix, ignore_errors=True)
+        raise
 
     # Capture the pgid NOW, before the leader can exit and be reaped.
     # Once the leader is reaped, os.getpgid(proc.pid) raises
@@ -308,32 +318,35 @@ def _run_one_file(
             pgid = None
 
     try:
-        output, _ = proc.communicate(timeout=file_timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc, pgid=pgid)
-        # Drain whatever the child wrote before we killed it so we have
-        # something to surface in the failure dump.
         try:
-            output, _ = proc.communicate(timeout=10)
+            output, _ = proc.communicate(timeout=file_timeout)
+            rc = proc.returncode
         except subprocess.TimeoutExpired:
-            output = "(file timeout exceeded; output unavailable)"
-        rc = 124  # de facto convention for "killed by timeout".
-        output = (
-            f"(per-file timeout: {file_timeout:.0f}s exceeded; "
-            f"process tree SIGKILL'd)\n{output}"
-        )
-    except BaseException:
-        # KeyboardInterrupt / runner crash — make sure no zombie
-        # grandchildren outlive us.
-        _kill_tree(proc, pgid=pgid)
-        raise
-    else:
-        # Happy path: pytest exited on its own. The child process already
-        # cleaned up its grandchildren if it's well-behaved, but
-        # well-behaved is not universal — kill the group anyway. Already-
-        # dead processes are a no-op.
-        _kill_tree(proc, pgid=pgid)
+            _kill_tree(proc, pgid=pgid)
+            # Drain whatever the child wrote before we killed it so we have
+            # something to surface in the failure dump.
+            try:
+                output, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                output = "(file timeout exceeded; output unavailable)"
+            rc = 124  # de facto convention for "killed by timeout".
+            output = (
+                f"(per-file timeout: {file_timeout:.0f}s exceeded; "
+                f"process tree SIGKILL'd)\n{output}"
+            )
+        except BaseException:
+            # KeyboardInterrupt / runner crash — make sure no zombie
+            # grandchildren outlive us.
+            _kill_tree(proc, pgid=pgid)
+            raise
+        else:
+            # Happy path: pytest exited on its own. The child process already
+            # cleaned up its grandchildren if it's well-behaved, but
+            # well-behaved is not universal — kill the group anyway. Already-
+            # dead processes are a no-op.
+            _kill_tree(proc, pgid=pgid)
+    finally:
+        shutil.rmtree(pycache_prefix, ignore_errors=True)
 
     if rc == 5:
         # No tests collected — every test in the file was filtered out.

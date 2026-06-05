@@ -509,7 +509,7 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     raw = str(workdir).strip()
     if not raw:
         return None
-    expanded = Path(raw).expanduser()
+    expanded = _expand_workdir_home(raw)
     if not expanded.is_absolute():
         raise ValueError(
             f"Cron workdir must be an absolute path (got {raw!r}). "
@@ -521,6 +521,19 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     if not resolved.is_dir():
         raise ValueError(f"Cron workdir is not a directory: {resolved}")
     return str(resolved)
+
+
+def _expand_workdir_home(raw: str) -> Path:
+    """Expand ``~`` using HOME when provided, including on Windows."""
+    if raw == "~":
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            return Path(home)
+    if raw.startswith("~/") or raw.startswith("~\\"):
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            return Path(home) / raw[2:]
+    return Path(raw).expanduser()
 
 
 def _normalize_profile(profile: Optional[str]) -> Optional[str]:
