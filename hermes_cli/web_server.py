@@ -4964,6 +4964,15 @@ def _resolve_web_chat_model(provider: Optional[str], model: Optional[str]) -> tu
         return selected_provider, selected_model
 
     current_provider, current_model = _current_model_assignment()
+    if not current_provider or not current_model:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No active chat model is configured for the current Hermes profile. "
+                "Select a provider/model from the Models page or switch to a profile "
+                "with a configured model."
+            ),
+        )
     _ensure_allowed_runtime_model(current_provider, current_model)
     return current_provider, current_model
 
@@ -4980,6 +4989,7 @@ def _run_web_chat_turn(
     agent_kwargs: Dict[str, Any] = {
         "session_id": session_id,
         "platform": "web_chat",
+        "quiet_mode": True,
     }
     if provider:
         agent_kwargs["provider"] = provider

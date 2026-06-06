@@ -401,10 +401,18 @@ class TestWebServerEndpoints:
         finally:
             db.close()
 
-        def fake_run(session_id, message, conversation_history):
+        monkeypatch.setattr(
+            web_server,
+            "_current_model_assignment",
+            lambda: ("custom", "llama3.1:8b"),
+        )
+
+        def fake_run(session_id, message, conversation_history, provider, model):
             assert session_id == "web-chat-test"
             assert message == "hello Hermes"
             assert conversation_history == []
+            assert provider == "custom"
+            assert model == "llama3.1:8b"
             return {"final_response": "hello from web chat"}
 
         monkeypatch.setattr(web_server, "_run_web_chat_turn", fake_run)
@@ -422,6 +430,59 @@ class TestWebServerEndpoints:
             "hello Hermes",
             "hello from web chat",
         ]
+
+    def test_web_chat_message_rejects_missing_runtime_model(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session("web-chat-no-model", source="web_chat")
+        finally:
+            db.close()
+
+        monkeypatch.setattr(web_server, "_current_model_assignment", lambda: ("", ""))
+
+        def fake_run(*_args, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError("web chat reached AIAgent without a configured model")
+
+        monkeypatch.setattr(web_server, "_run_web_chat_turn", fake_run)
+
+        resp = self.client.post(
+            "/api/chat/sessions/web-chat-no-model/messages",
+            json={"message": "hello Hermes"},
+        )
+
+        assert resp.status_code == 400
+        assert "No active chat model is configured" in resp.json()["detail"]
+
+    def test_web_chat_agent_runs_quietly(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def run_conversation(self, **_kwargs):
+                return {"final_response": "ok"}
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+
+        result = web_server._run_web_chat_turn(
+            "web-chat-quiet",
+            "hello Hermes",
+            [],
+            "custom",
+            "llama3.1:8b",
+        )
+
+        assert result["final_response"] == "ok"
+        assert captured["provider"] == "custom"
+        assert captured["model"] == "llama3.1:8b"
+        assert captured["platform"] == "web_chat"
+        assert captured["quiet_mode"] is True
 
     def test_web_chat_message_rejects_empty_message(self):
         resp = self.client.post(
