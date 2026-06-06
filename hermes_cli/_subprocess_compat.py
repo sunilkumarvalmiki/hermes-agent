@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import shutil
 import sys
+from pathlib import Path
 from typing import Sequence
 
 __all__ = [
     "IS_WINDOWS",
     "resolve_node_command",
+    "resolve_hidden_python",
     "windows_detach_flags",
     "windows_hide_flags",
     "windows_detach_popen_kwargs",
@@ -84,6 +86,65 @@ def resolve_node_command(name: str, argv: Sequence[str]) -> list[str]:
     if resolved:
         return [resolved, *argv]
     return [name, *argv]
+
+
+# -----------------------------------------------------------------------------
+# Python launcher resolution
+# -----------------------------------------------------------------------------
+
+
+def _derive_venv_pythonw(python_exe: str) -> str:
+    """Return the sibling ``pythonw.exe`` for a venv interpreter when present."""
+    p = Path(python_exe)
+    candidate = p.with_name(p.stem + "w" + p.suffix)
+    if candidate.exists():
+        return str(candidate)
+    return python_exe
+
+
+def _read_pyvenv_cfg(venv_dir: Path) -> dict[str, str]:
+    cfg_path = venv_dir / "pyvenv.cfg"
+    try:
+        lines = cfg_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    parsed: dict[str, str] = {}
+    for raw in lines:
+        if "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        parsed[key.strip().lower()] = value.strip()
+    return parsed
+
+
+def resolve_hidden_python(python_exe: str) -> tuple[str, Path | None, list[str]]:
+    """Return ``(python, venv_dir, extra_pythonpath)`` for hidden Windows runs.
+
+    Normal venvs can use their sibling ``pythonw.exe``. uv-created Windows
+    venv launchers are more subtle: ``venv\\Scripts\\pythonw.exe`` starts
+    hidden and then respawns the base interpreter as console ``python.exe``.
+    That respawn is what opens a visible terminal tab. For those venvs, use the
+    base ``pythonw.exe`` directly and put the venv ``site-packages`` on
+    ``PYTHONPATH`` so imports still resolve without the venv launcher.
+
+    On non-Windows this is a no-op and returns the original interpreter.
+    """
+    if not IS_WINDOWS:
+        return python_exe, None, []
+
+    p = Path(python_exe)
+    venv_dir = p.parent.parent
+    windowed = _derive_venv_pythonw(python_exe)
+
+    cfg = _read_pyvenv_cfg(venv_dir)
+    home = cfg.get("home", "")
+    if "uv" in cfg and home:
+        base_pythonw = Path(home) / "pythonw.exe"
+        site_packages = venv_dir / "Lib" / "site-packages"
+        if base_pythonw.exists() and site_packages.exists():
+            return str(base_pythonw), venv_dir, [str(site_packages)]
+
+    return windowed, venv_dir if venv_dir.exists() else None, []
 
 
 # -----------------------------------------------------------------------------

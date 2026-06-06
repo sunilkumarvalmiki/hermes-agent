@@ -291,15 +291,45 @@ export const api = {
     fetchJSON<WebChatSessionResponse>("/api/chat/sessions", {
       method: "POST",
     }),
-  sendWebChatMessage: (id: string, message: string) =>
-    fetchJSON<WebChatMessageResponse>(
+  sendWebChatMessage: (
+    id: string,
+    messageOrBody: string | WebChatSendRequest,
+    init?: Pick<RequestInit, "signal">,
+  ) => {
+    const body =
+      typeof messageOrBody === "string"
+        ? { message: messageOrBody }
+        : messageOrBody;
+    return fetchJSON<WebChatMessageResponse>(
       `/api/chat/sessions/${encodeURIComponent(id)}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify(body),
+        signal: init?.signal,
+      },
+    );
+  },
+  cancelWebChatGeneration: (id: string) =>
+    fetchJSON<WebChatCancelResponse>(
+      `/api/chat/sessions/${encodeURIComponent(id)}/cancel`,
+      {
+        method: "POST",
       },
     ),
+  uploadWebChatAttachment: async (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await authedFetch(
+      `/api/chat/sessions/${encodeURIComponent(id)}/attachments`,
+      { method: "POST", body: form },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    return res.json() as Promise<WebChatAttachment>;
+  },
   getSessionLatestDescendant: (id: string) =>
     fetchJSON<SessionLatestDescendantResponse>(
       `/api/sessions/${encodeURIComponent(id)}/latest-descendant`,
@@ -1327,10 +1357,32 @@ export interface WebChatSessionResponse {
   session_id: string;
 }
 
+export interface WebChatSendRequest {
+  message: string;
+  provider?: string;
+  model?: string;
+  attachment_ids?: string[];
+}
+
 export interface WebChatMessageResponse {
   session_id: string;
   assistant_message: string;
   messages: SessionMessage[];
+}
+
+export interface WebChatCancelResponse {
+  ok: boolean;
+  cancelled: boolean;
+}
+
+export interface WebChatAttachment {
+  id: string;
+  filename: string;
+  size: number;
+  content_type: string;
+  path: string;
+  session_id: string;
+  max_bytes: number;
 }
 
 export interface LogsResponse {

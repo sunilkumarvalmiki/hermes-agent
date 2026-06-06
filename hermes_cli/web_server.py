@@ -59,12 +59,12 @@ from hermes_cli.config import (
     recommended_update_command_for_method,
     redact_key,
 )
-from hermes_cli._subprocess_compat import windows_detach_flags
+from hermes_cli._subprocess_compat import resolve_hidden_python, windows_detach_flags
 from gateway.status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
 
 try:
-    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
@@ -76,7 +76,7 @@ except ImportError:
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.dashboard", prompt=False)
-        from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+        from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
@@ -718,6 +718,38 @@ def _apply_main_model_assignment(
     return model_cfg
 
 
+def _ensure_allowed_runtime_model(provider: str | None, model: str | None) -> None:
+    """Reject disabled Google/Gemini runtime model choices.
+
+    The adapters can remain in the codebase for historical tests and tools, but
+    the Hermes dashboard/runtime must not offer or select them.
+    """
+    from hermes_cli.inventory import (
+        is_disabled_google_gemini_model,
+        is_disabled_google_gemini_provider,
+    )
+
+    if is_disabled_google_gemini_provider(provider) or is_disabled_google_gemini_model(model):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Gemini/Google models are disabled in this Hermes Agent build. "
+                "Choose a non-Google provider/model such as Ollama, Nous, OpenAI/Codex, "
+                "Anthropic, OpenRouter, or a custom local endpoint."
+            ),
+        )
+
+
+def _current_model_assignment() -> tuple[str, str]:
+    cfg = load_config()
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, dict):
+        provider = str(model_cfg.get("provider", "") or "")
+        model = str(model_cfg.get("default", model_cfg.get("name", "")) or "")
+        return provider, model
+    return "", str(model_cfg or "")
+
+
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
 try:
     _GATEWAY_HEALTH_TIMEOUT = float(os.getenv("GATEWAY_HEALTH_TIMEOUT", "3"))
@@ -1223,6 +1255,16 @@ def _record_completed_action(name: str, message: str, exit_code: int = 1) -> Non
     _ACTION_RESULTS[name] = {"exit_code": exit_code, "pid": None}
 
 
+def _prepend_pythonpath(env: Dict[str, str], entries: List[str]) -> None:
+    clean_entries = [entry for entry in entries if entry]
+    if not clean_entries:
+        return
+    existing = env.get("PYTHONPATH", "")
+    if existing:
+        clean_entries.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(clean_entries)
+
+
 def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
     """Spawn ``hermes <subcommand>`` detached and record the Popen handle.
 
@@ -1237,14 +1279,23 @@ def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
         f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
     )
 
-    cmd = [sys.executable, "-m", "hermes_cli.main", *subcommand]
+    env = {**os.environ, "HERMES_NONINTERACTIVE": "1"}
+    python_exe = sys.executable
+    if sys.platform == "win32":
+        python_exe, venv_dir, extra_pythonpath = resolve_hidden_python(sys.executable)
+        if venv_dir is not None:
+            env["VIRTUAL_ENV"] = str(venv_dir)
+        _prepend_pythonpath(env, [str(PROJECT_ROOT), *extra_pythonpath])
+
+    cmd = [python_exe, "-m", "hermes_cli.main", *subcommand]
 
     popen_kwargs: Dict[str, Any] = {
         "cwd": str(PROJECT_ROOT),
         "stdin": subprocess.DEVNULL,
         "stdout": log_file,
         "stderr": subprocess.STDOUT,
-        "env": {**os.environ, "HERMES_NONINTERACTIVE": "1"},
+        "env": env,
+        "close_fds": True,
     }
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = windows_detach_flags()
@@ -2152,6 +2203,7 @@ async def set_model_assignment(body: ModelAssignment):
         if scope == "main":
             if not provider or not model:
                 raise HTTPException(status_code=400, detail="provider and model required for main")
+            _ensure_allowed_runtime_model(provider, model)
             model_cfg = _apply_main_model_assignment(
                 cfg.get("model", {}), provider, model, base_url
             )
@@ -2216,6 +2268,8 @@ async def set_model_assignment(body: ModelAssignment):
 
         if not provider:
             raise HTTPException(status_code=400, detail="provider required for auxiliary")
+        if provider.lower() != "auto":
+            _ensure_allowed_runtime_model(provider, model)
 
         targets = [task] if task else list(_AUX_TASK_SLOTS)
         for slot in targets:
@@ -4823,28 +4877,147 @@ async def delete_session_endpoint(session_id: str):
 
 class WebChatMessage(BaseModel):
     message: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    attachment_ids: Optional[List[str]] = None
+
+
+_WEB_CHAT_ACTIVE_AGENTS: Dict[str, Any] = {}
+_WEB_CHAT_ACTIVE_AGENTS_LOCK = threading.Lock()
+_WEB_CHAT_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_WEB_CHAT_UPLOAD_DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 
 
 def _new_web_chat_session_id() -> str:
     return f"web-chat-{uuid.uuid4().hex}"
 
 
+def _web_chat_upload_max_bytes() -> int:
+    raw = os.environ.get("HERMES_WEB_CHAT_UPLOAD_MAX_BYTES", "").strip()
+    if not raw:
+        return _WEB_CHAT_UPLOAD_DEFAULT_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        _log.warning("Invalid HERMES_WEB_CHAT_UPLOAD_MAX_BYTES=%r; using default", raw)
+        return _WEB_CHAT_UPLOAD_DEFAULT_MAX_BYTES
+    return max(value, _WEB_CHAT_UPLOAD_CHUNK_BYTES)
+
+
+def _sanitize_upload_filename(filename: str | None) -> str:
+    raw = (filename or "attachment").replace("\\", "/").split("/")[-1].strip()
+    if not raw or raw in {".", ".."}:
+        raw = "attachment"
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", ".", " "} else "_" for ch in raw)
+    cleaned = cleaned.strip(" .")
+    return (cleaned or "attachment")[:180]
+
+
+def _web_chat_upload_dir(session_id: str) -> Path:
+    return get_hermes_home() / "uploads" / "web_chat" / session_id
+
+
+def _web_chat_attachment_metadata_path(session_id: str, attachment_id: str) -> Path:
+    return _web_chat_upload_dir(session_id) / f"{attachment_id}.json"
+
+
+def _load_web_chat_attachment(session_id: str, attachment_id: str) -> dict[str, Any]:
+    if not attachment_id or "/" in attachment_id or "\\" in attachment_id or ".." in attachment_id:
+        raise HTTPException(status_code=400, detail=f"invalid attachment id: {attachment_id!r}")
+    metadata_path = _web_chat_attachment_metadata_path(session_id, attachment_id)
+    if not metadata_path.exists():
+        raise HTTPException(status_code=404, detail=f"attachment {attachment_id!r} not found")
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"could not read attachment metadata: {exc}")
+    path = Path(str(data.get("path", "")))
+    root = _web_chat_upload_dir(session_id).resolve()
+    try:
+        path.resolve().relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"attachment {attachment_id!r} points outside chat storage")
+    return data
+
+
+def _attachment_context(session_id: str, attachment_ids: List[str]) -> str:
+    if not attachment_ids:
+        return ""
+    rows = []
+    for attachment_id in attachment_ids:
+        meta = _load_web_chat_attachment(session_id, attachment_id)
+        rows.append(
+            f"- {meta.get('filename', 'attachment')} "
+            f"({meta.get('size', 0)} bytes, {meta.get('content_type') or 'application/octet-stream'}): "
+            f"{meta.get('path')}"
+        )
+    return "Attached files are stored for this chat turn:\n" + "\n".join(rows)
+
+
+def _resolve_web_chat_model(provider: Optional[str], model: Optional[str]) -> tuple[str, str]:
+    selected_provider = (provider or "").strip()
+    selected_model = (model or "").strip()
+    if selected_provider or selected_model:
+        if not selected_provider or not selected_model:
+            raise HTTPException(status_code=400, detail="provider and model must be supplied together")
+        _ensure_allowed_runtime_model(selected_provider, selected_model)
+        return selected_provider, selected_model
+
+    current_provider, current_model = _current_model_assignment()
+    _ensure_allowed_runtime_model(current_provider, current_model)
+    return current_provider, current_model
+
+
 def _run_web_chat_turn(
     session_id: str,
     message: str,
     conversation_history: list[dict],
+    provider: str = "",
+    model: str = "",
 ) -> dict[str, Any]:
     from run_agent import AIAgent
 
+    agent_kwargs: Dict[str, Any] = {
+        "session_id": session_id,
+        "platform": "web_chat",
+    }
+    if provider:
+        agent_kwargs["provider"] = provider
+    if model:
+        agent_kwargs["model"] = model
+
     agent = AIAgent(
-        session_id=session_id,
-        platform="web_chat",
+        **agent_kwargs,
     )
-    result = agent.run_conversation(
-        user_message=message,
-        conversation_history=conversation_history,
-    )
-    return result if isinstance(result, dict) else {"final_response": str(result)}
+    with _WEB_CHAT_ACTIVE_AGENTS_LOCK:
+        _WEB_CHAT_ACTIVE_AGENTS[session_id] = agent
+    try:
+        result = agent.run_conversation(
+            user_message=message,
+            conversation_history=conversation_history,
+        )
+        return result if isinstance(result, dict) else {"final_response": str(result)}
+    finally:
+        with _WEB_CHAT_ACTIVE_AGENTS_LOCK:
+            if _WEB_CHAT_ACTIVE_AGENTS.get(session_id) is agent:
+                _WEB_CHAT_ACTIVE_AGENTS.pop(session_id, None)
+
+
+def _invoke_web_chat_turn(
+    session_id: str,
+    message: str,
+    conversation_history: list[dict],
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    """Invoke the active turn function while tolerating legacy test fakes."""
+    try:
+        params = inspect.signature(_run_web_chat_turn).parameters
+        if len(params) <= 3:
+            return _run_web_chat_turn(session_id, message, conversation_history)
+    except (TypeError, ValueError):
+        pass
+    return _run_web_chat_turn(session_id, message, conversation_history, provider, model)
 
 
 def _message_was_persisted(messages: list[dict], role: str, content: str) -> bool:
@@ -4863,6 +5036,32 @@ def _assistant_text_from_result(result: dict[str, Any]) -> str:
     return "" if final is None else str(final)
 
 
+_WEB_CHAT_PROVIDER_ERROR_PREFIXES = (
+    "API call failed after",
+    "API failed after",
+    "Connection error",
+    "Invalid API response",
+    "Proxy connection error",
+    "Proxy error",
+)
+
+
+def _web_chat_provider_error(result: dict[str, Any], provider: str, model: str) -> str:
+    explicit_error = result.get("error")
+    text = _assistant_text_from_result(result).strip()
+    raw = ""
+    if explicit_error:
+        raw = str(explicit_error).strip()
+    elif result.get("failed") is True and text:
+        raw = text
+    elif any(text.startswith(prefix) for prefix in _WEB_CHAT_PROVIDER_ERROR_PREFIXES):
+        raw = text
+    if not raw:
+        return ""
+    target = f"{provider}/{model}" if provider and model else "current profile model"
+    return f"Chat model request failed ({target}): {raw}"
+
+
 @app.post("/api/chat/sessions")
 async def create_web_chat_session():
     from hermes_state import SessionDB
@@ -4876,6 +5075,87 @@ async def create_web_chat_session():
         db.close()
 
 
+@app.post("/api/chat/sessions/{session_id}/attachments")
+async def upload_web_chat_attachment(session_id: str, file: UploadFile = File(...)):
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+    try:
+        if db.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+    finally:
+        db.close()
+
+    attachment_id = uuid.uuid4().hex
+    filename = _sanitize_upload_filename(file.filename)
+    upload_dir = _web_chat_upload_dir(session_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    storage_path = upload_dir / f"{attachment_id}_{filename}"
+    max_bytes = _web_chat_upload_max_bytes()
+    size = 0
+
+    try:
+        with open(storage_path, "wb") as out:
+            while True:
+                chunk = await file.read(_WEB_CHAT_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    out.close()
+                    storage_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"attachment exceeds configured limit of {max_bytes} bytes "
+                            "(HERMES_WEB_CHAT_UPLOAD_MAX_BYTES)"
+                        ),
+                    )
+                out.write(chunk)
+    except HTTPException:
+        raise
+    except OSError as exc:
+        storage_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"could not store attachment: {exc}")
+    finally:
+        await file.close()
+
+    metadata = {
+        "id": attachment_id,
+        "filename": filename,
+        "size": size,
+        "content_type": file.content_type or "application/octet-stream",
+        "path": str(storage_path),
+        "session_id": session_id,
+        "created_at": time.time(),
+        "max_bytes": max_bytes,
+    }
+    try:
+        _web_chat_attachment_metadata_path(session_id, attachment_id).write_text(
+            json.dumps(metadata, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        storage_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"could not store attachment metadata: {exc}")
+
+    return metadata
+
+
+@app.post("/api/chat/sessions/{session_id}/cancel")
+async def cancel_web_chat_generation(session_id: str):
+    with _WEB_CHAT_ACTIVE_AGENTS_LOCK:
+        agent = _WEB_CHAT_ACTIVE_AGENTS.get(session_id)
+    if agent is None:
+        return {"ok": True, "cancelled": False}
+    try:
+        agent.interrupt("Cancelled from web chat")
+    except Exception as exc:
+        _log.exception("POST /api/chat/sessions/%s/cancel failed", session_id)
+        raise HTTPException(status_code=500, detail=f"could not cancel chat generation: {exc}")
+    return {"ok": True, "cancelled": True}
+
+
 @app.post("/api/chat/sessions/{session_id}/messages")
 async def submit_web_chat_message(session_id: str, body: WebChatMessage):
     from hermes_state import SessionDB
@@ -4883,6 +5163,10 @@ async def submit_web_chat_message(session_id: str, body: WebChatMessage):
     message = (body.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
+    provider, model = _resolve_web_chat_model(body.provider, body.model)
+    attachment_ids = list(body.attachment_ids or [])
+    attachment_context = _attachment_context(session_id, attachment_ids)
+    agent_message = f"{message}\n\n{attachment_context}" if attachment_context else message
 
     db = SessionDB()
     try:
@@ -4892,12 +5176,35 @@ async def submit_web_chat_message(session_id: str, body: WebChatMessage):
     finally:
         db.close()
 
-    result = await asyncio.to_thread(
-        _run_web_chat_turn,
-        session_id,
-        message,
-        conversation_history,
-    )
+    try:
+        result = await asyncio.to_thread(
+            _invoke_web_chat_turn,
+            session_id,
+            agent_message,
+            conversation_history,
+            provider,
+            model,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception(
+            "web chat turn failed: session_id=%s provider=%s model=%s",
+            session_id,
+            provider,
+            model,
+        )
+        raise HTTPException(status_code=500, detail=f"Chat request failed: {exc}")
+    provider_error = _web_chat_provider_error(result, provider, model)
+    if provider_error:
+        _log.warning(
+            "web chat provider failed: session_id=%s provider=%s model=%s detail=%s",
+            session_id,
+            provider,
+            model,
+            provider_error,
+        )
+        raise HTTPException(status_code=502, detail=provider_error)
     assistant_message = _assistant_text_from_result(result)
 
     db = SessionDB()
@@ -6497,6 +6804,7 @@ def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
     Clears any stale ``base_url`` / ``context_length`` the same way
     ``POST /api/model/set`` does, since the new model may differ.
     """
+    _ensure_allowed_runtime_model(provider, model)
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
     token = set_hermes_home_override(str(profile_dir))
@@ -6506,6 +6814,154 @@ def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
         save_config(cfg)
     finally:
         reset_hermes_home_override(token)
+
+
+try:
+    _PROFILE_SWITCH_HEALTH_TIMEOUT = float(os.getenv("HERMES_PROFILE_SWITCH_HEALTH_TIMEOUT", "15"))
+except (ValueError, TypeError):
+    _PROFILE_SWITCH_HEALTH_TIMEOUT = 15.0
+
+
+def _stop_profile_gateway_for_dir(profile_dir: Path) -> bool:
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from hermes_cli import gateway as gateway_mod
+
+    token = set_hermes_home_override(str(profile_dir))
+    try:
+        return bool(gateway_mod.stop_profile_gateway())
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _start_profile_gateway_for_dir(profile_name: str, profile_dir: Path) -> Dict[str, Any]:
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+    token = set_hermes_home_override(str(profile_dir))
+    try:
+        if sys.platform.startswith("win"):
+            from hermes_cli import gateway_windows
+
+            if hasattr(gateway_windows, "_spawn_detached"):
+                pid = gateway_windows._spawn_detached()
+                return {"profile": profile_name, "started": True, "pid": pid, "mode": "direct"}
+            gateway_windows.start()
+            return {"profile": profile_name, "started": True, "pid": None, "mode": "windows"}
+
+        proc = _spawn_hermes_action(
+            ["--profile", profile_name, "gateway", "start"],
+            "gateway-start",
+        )
+        return {"profile": profile_name, "started": True, "pid": proc.pid, "mode": "subprocess"}
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _wait_for_profile_gateway_health(profile_dir: Path, timeout: float) -> Dict[str, Any]:
+    from hermes_cli import profiles as profiles_mod
+
+    deadline = time.monotonic() + max(timeout, 0.0)
+    running = profiles_mod._check_gateway_running(profile_dir)
+    while not running and time.monotonic() < deadline:
+        time.sleep(0.5)
+        running = profiles_mod._check_gateway_running(profile_dir)
+    return {
+        "running": bool(running),
+        "profile_dir": str(profile_dir),
+        "timeout_seconds": timeout,
+    }
+
+
+def _activate_profile_lifecycle(name: str) -> Dict[str, Any]:
+    from hermes_cli import profiles as profiles_mod
+
+    requested = profiles_mod.normalize_profile_name(name)
+    requested_dir = _resolve_profile_dir(requested)
+    previous = profiles_mod.get_active_profile() or "default"
+    stopped_gateways: List[Dict[str, Any]] = []
+
+    try:
+        profile_infos = list(profiles_mod.list_profiles())
+    except Exception:
+        _log.exception("profile switch: failed to list profiles; using fallback scan")
+        profile_infos = []
+
+    _log.info(
+        "profile switch requested: requested=%s previous=%s",
+        requested,
+        previous,
+    )
+
+    for info in profile_infos:
+        profile_name = str(_profile_attr(info, "name", "") or "")
+        profile_dir_raw = _profile_attr(info, "path", None)
+        if not profile_name or profile_name == requested or not profile_dir_raw:
+            continue
+        profile_dir = Path(profile_dir_raw)
+        if not bool(_profile_attr(info, "gateway_running", False)):
+            continue
+        try:
+            stopped = _stop_profile_gateway_for_dir(profile_dir)
+            stopped_gateways.append({
+                "profile": profile_name,
+                "profile_dir": str(profile_dir),
+                "stopped": stopped,
+            })
+            _log.info(
+                "profile switch gateway stop: profile=%s stopped=%s",
+                profile_name,
+                stopped,
+            )
+        except Exception as exc:
+            stopped_gateways.append({
+                "profile": profile_name,
+                "profile_dir": str(profile_dir),
+                "stopped": False,
+                "error": str(exc),
+            })
+            _log.exception("profile switch gateway stop failed: profile=%s", profile_name)
+
+    profiles_mod.set_active_profile(requested)
+
+    gateway_start: Dict[str, Any]
+    if profiles_mod._check_gateway_running(requested_dir):
+        gateway_start = {
+            "profile": requested,
+            "profile_dir": str(requested_dir),
+            "started": False,
+            "already_running": True,
+        }
+    else:
+        try:
+            gateway_start = _start_profile_gateway_for_dir(requested, requested_dir)
+            gateway_start["profile_dir"] = str(requested_dir)
+        except Exception as exc:
+            gateway_start = {
+                "profile": requested,
+                "profile_dir": str(requested_dir),
+                "started": False,
+                "error": str(exc),
+            }
+            _log.exception("profile switch gateway start failed: profile=%s", requested)
+
+    health = _wait_for_profile_gateway_health(requested_dir, _PROFILE_SWITCH_HEALTH_TIMEOUT)
+    health["profile"] = requested
+    active_after = profiles_mod.get_active_profile() or "default"
+    _log.info(
+        "profile switch completed: requested=%s previous=%s active=%s start=%s health=%s",
+        requested,
+        previous,
+        active_after,
+        gateway_start,
+        health,
+    )
+    return {
+        "requested_profile": requested,
+        "previous_profile": previous,
+        "active_profile": active_after,
+        "stopped_gateways": stopped_gateways,
+        "gateway_start": gateway_start,
+        "health": health,
+    }
 
 
 @app.get("/api/profiles")
@@ -6590,14 +7046,11 @@ async def get_active_profile_endpoint():
 
 @app.post("/api/profiles/active")
 async def set_active_profile_endpoint(body: ProfileActiveUpdate):
-    """Set the sticky active profile (mirrors ``hermes profile use``).
-
-    Note: this does not retarget the already-running dashboard process —
-    it changes which profile subsequent CLI commands and gateways use.
-    """
-    from hermes_cli import profiles as profiles_mod
+    """Activate a profile and retarget the profile-scoped gateway."""
     try:
-        profiles_mod.set_active_profile(body.name)
+        lifecycle = await asyncio.to_thread(_activate_profile_lifecycle, body.name)
+    except HTTPException:
+        raise
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -6605,7 +7058,11 @@ async def set_active_profile_endpoint(body: ProfileActiveUpdate):
     except Exception as e:
         _log.exception("POST /api/profiles/active failed")
         raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "active": profiles_mod.normalize_profile_name(body.name)}
+    return {
+        "ok": True,
+        "active": lifecycle["active_profile"],
+        "lifecycle": lifecycle,
+    }
 
 
 @app.get("/api/profiles/{name}/setup-command")

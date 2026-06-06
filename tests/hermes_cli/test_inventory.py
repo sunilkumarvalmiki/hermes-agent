@@ -173,6 +173,74 @@ def test_build_models_payload_does_not_call_provider_model_ids():
     mock_pm.assert_not_called()
 
 
+def test_build_models_payload_filters_google_gemini_runtime_options():
+    """The dashboard/runtime picker must not offer Gemini/Google models.
+
+    This is intentionally a model-inventory contract, not a UI snapshot: all
+    consumers share build_models_payload(), so filtering here keeps the web
+    picker, TUI picker, and chat model selector in sync.
+    """
+    rows = [
+        {
+            "slug": "google-gemini-cli",
+            "name": "Google Gemini OAuth",
+            "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+            "total_models": 2,
+            "is_current": False,
+            "is_user_defined": False,
+            "source": "built-in",
+        },
+        {
+            "slug": "gemini",
+            "name": "Google AI Studio",
+            "models": ["gemini-2.5-pro"],
+            "total_models": 1,
+            "is_current": False,
+            "is_user_defined": False,
+            "source": "built-in",
+        },
+        {
+            "slug": "openrouter",
+            "name": "OpenRouter",
+            "models": [
+                "anthropic/claude-sonnet-4.7",
+                "google/gemini-2.5-flash",
+                "google/gemma-3-27b-it",
+            ],
+            "total_models": 3,
+            "is_current": True,
+            "is_user_defined": False,
+            "source": "built-in",
+        },
+        {
+            "slug": "nous",
+            "name": "Nous",
+            "models": ["hermes-4-405b", "gemini-3-pro-preview"],
+            "total_models": 2,
+            "is_current": False,
+            "is_user_defined": False,
+            "source": "built-in",
+        },
+    ]
+    ctx = _empty_ctx(provider="openrouter", model="anthropic/claude-sonnet-4.7")
+
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx)
+
+    providers = payload["providers"]
+    slugs = {row["slug"] for row in providers}
+    assert "google-gemini-cli" not in slugs
+    assert "gemini" not in slugs
+
+    openrouter = next(row for row in providers if row["slug"] == "openrouter")
+    assert openrouter["models"] == ["anthropic/claude-sonnet-4.7"]
+    assert openrouter["total_models"] == 1
+
+    nous = next(row for row in providers if row["slug"] == "nous")
+    assert nous["models"] == ["hermes-4-405b"]
+    assert nous["total_models"] == 1
+
+
 def test_include_unconfigured_appends_canonical_skeletons():
     """include_unconfigured=True adds CANONICAL_PROVIDERS rows that
     list_authenticated_providers didn't emit. Skeleton rows have empty
@@ -190,7 +258,12 @@ def test_include_unconfigured_appends_canonical_skeletons():
     from hermes_cli.models import CANONICAL_PROVIDERS
 
     seen_slugs = {r["slug"] for r in payload["providers"]}
+    from hermes_cli.inventory import is_disabled_google_gemini_provider
+
     for entry in CANONICAL_PROVIDERS:
+        if is_disabled_google_gemini_provider(entry.slug):
+            assert entry.slug not in seen_slugs
+            continue
         assert entry.slug in seen_slugs, f"missing {entry.slug}"
     # Skeletons have empty models and source='canonical'.
     skeletons = [r for r in payload["providers"]
@@ -334,7 +407,14 @@ def test_canonical_order_with_unconfigured_preserves_full_universe():
     # First row: first canonical provider in declaration order.
     assert slugs[0] == CANONICAL_PROVIDERS[0].slug
     # Custom row trails canonical universe.
-    assert slugs.index("custom:Ollama") >= len(CANONICAL_PROVIDERS)
+    from hermes_cli.inventory import is_disabled_google_gemini_provider
+
+    enabled_canonical_count = sum(
+        1
+        for entry in CANONICAL_PROVIDERS
+        if not is_disabled_google_gemini_provider(entry.slug)
+    )
+    assert slugs.index("custom:Ollama") >= enabled_canonical_count
 
 
 # ─── Integration: end-to-end through real load_picker_context ──────────

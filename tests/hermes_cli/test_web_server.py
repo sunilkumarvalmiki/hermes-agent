@@ -430,6 +430,109 @@ class TestWebServerEndpoints:
         )
         assert resp.status_code == 400
 
+    def test_web_chat_message_surfaces_provider_failure(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session("web-chat-provider-error", source="web_chat")
+        finally:
+            db.close()
+
+        def fake_run(*_args, **_kwargs):
+            return {
+                "failed": True,
+                "error": "Connection error",
+                "final_response": "API call failed after 3 retries: Connection error.",
+            }
+
+        monkeypatch.setattr(web_server, "_run_web_chat_turn", fake_run)
+
+        resp = self.client.post(
+            "/api/chat/sessions/web-chat-provider-error/messages",
+            json={"message": "hello Hermes", "provider": "custom", "model": "llama3.1:8b"},
+        )
+
+        assert resp.status_code == 502
+        assert "custom/llama3.1:8b" in resp.json()["detail"]
+        assert "Connection error" in resp.json()["detail"]
+
+    def test_web_chat_message_rejects_google_gemini_model(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session("web-chat-google", source="web_chat")
+        finally:
+            db.close()
+
+        def fake_run(*_args, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError("disabled Google/Gemini model reached the agent")
+
+        monkeypatch.setattr(web_server, "_run_web_chat_turn", fake_run)
+
+        resp = self.client.post(
+            "/api/chat/sessions/web-chat-google/messages",
+            json={
+                "message": "hello",
+                "provider": "google-gemini-cli",
+                "model": "gemini-2.5-pro",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "Gemini/Google" in resp.json()["detail"]
+
+    def test_web_chat_cancel_interrupts_active_agent(self):
+        import hermes_cli.web_server as web_server
+
+        class FakeAgent:
+            def __init__(self):
+                self.messages = []
+
+            def interrupt(self, message=None):
+                self.messages.append(message)
+
+        agent = FakeAgent()
+        web_server._WEB_CHAT_ACTIVE_AGENTS["web-chat-cancel"] = agent
+        try:
+            resp = self.client.post("/api/chat/sessions/web-chat-cancel/cancel")
+        finally:
+            web_server._WEB_CHAT_ACTIVE_AGENTS.pop("web-chat-cancel", None)
+
+        assert resp.status_code == 200
+        assert resp.json()["cancelled"] is True
+        assert agent.messages == ["Cancelled from web chat"]
+
+    def test_web_chat_attachment_upload_streams_to_profile_storage(self):
+        from hermes_constants import get_hermes_home
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session("web-chat-upload", source="web_chat")
+        finally:
+            db.close()
+
+        resp = self.client.post(
+            "/api/chat/sessions/web-chat-upload/attachments",
+            files={"file": ("..\\notes.txt", b"hello attachment", "text/plain")},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"]
+        assert data["filename"] == "notes.txt"
+        assert data["size"] == len(b"hello attachment")
+        stored = Path(data["path"])
+        assert stored.exists()
+        assert stored.read_bytes() == b"hello attachment"
+        assert stored.is_relative_to(
+            get_hermes_home() / "uploads" / "web_chat" / "web-chat-upload"
+        )
+
     def test_archive_session_via_patch(self):
         """PATCH archived=true soft-hides a session; archived=false restores it."""
         from hermes_state import SessionDB
@@ -804,6 +907,49 @@ class TestWebServerEndpoints:
         assert flags & 0x08000000, "missing CREATE_NO_WINDOW"
         assert "start_new_session" not in captured["kwargs"]
 
+    def test_spawn_hermes_action_uses_hidden_python_on_windows(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+
+        class Proc:
+            pid = 22222
+
+            def poll(self):
+                return None
+
+        captured = {}
+        venv_dir = tmp_path / "venv"
+        site_packages = venv_dir / "Lib" / "site-packages"
+        hidden_python = tmp_path / "Python311" / "pythonw.exe"
+
+        def fake_resolve_hidden_python(_python_exe):
+            return str(hidden_python), venv_dir, [str(site_packages)]
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return Proc()
+
+        monkeypatch.setattr(web_server.sys, "platform", "win32")
+        monkeypatch.setattr(
+            web_server,
+            "resolve_hidden_python",
+            fake_resolve_hidden_python,
+            raising=False,
+        )
+        monkeypatch.setattr(web_server, "windows_detach_flags", lambda: 0x08000208)
+        monkeypatch.setattr(web_server.subprocess, "Popen", fake_popen)
+        web_server._ACTION_PROCS.pop("doctor", None)
+        web_server._ACTION_RESULTS.pop("doctor", None)
+
+        proc = web_server._spawn_hermes_action(["doctor"], "doctor")
+
+        assert proc.pid == 22222
+        assert captured["cmd"][0] == str(hidden_python)
+        env = captured["kwargs"]["env"]
+        assert env["VIRTUAL_ENV"] == str(venv_dir)
+        assert str(site_packages) in env["PYTHONPATH"]
+        assert str(web_server.PROJECT_ROOT) in env["PYTHONPATH"]
+
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
         import hermes_cli.web_server as web_server
@@ -1165,6 +1311,19 @@ class TestWebServerEndpoints:
         data = resp.json()
         assert data["ok"] is True
         assert data.get("gateway_tools", []) == []
+
+    def test_set_model_main_rejects_google_gemini_provider(self):
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "google-gemini-cli",
+                "model": "gemini-2.5-pro",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "Gemini/Google" in resp.json()["detail"]
 
     def test_apply_main_model_assignment_base_url_and_context_reconcile(self):
         """The shared main-slot assignment helper must persist base_url only for
@@ -1834,14 +1993,58 @@ class TestNewEndpoints:
 
     def test_profiles_set_active_round_trip(self, monkeypatch):
         import hermes_cli.profiles as profiles_mod
+        import hermes_cli.web_server as web_server
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
+
+        def fake_lifecycle(name):
+            profiles_mod.set_active_profile(name)
+            return {
+                "requested_profile": name,
+                "previous_profile": "default",
+                "active_profile": name,
+                "stopped_gateways": [],
+                "gateway_start": {"profile": name, "started": True},
+                "health": {"profile": name, "running": True},
+            }
+
+        monkeypatch.setattr(web_server, "_activate_profile_lifecycle", fake_lifecycle, raising=False)
 
         self.client.post("/api/profiles", json={"name": "router"})
 
         resp = self.client.post("/api/profiles/active", json={"name": "router"})
         assert resp.status_code == 200
         assert resp.json()["active"] == "router"
+        assert resp.json()["lifecycle"]["gateway_start"]["started"] is True
         assert self.client.get("/api/profiles/active").json()["active"] == "router"
+
+    def test_profiles_set_active_retargets_gateway_lifecycle(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        calls = []
+
+        def fake_lifecycle(name):
+            calls.append(name)
+            return {
+                "requested_profile": name,
+                "previous_profile": "planning",
+                "active_profile": name,
+                "stopped_gateways": [{"profile": "planning", "stopped": True}],
+                "gateway_start": {"profile": name, "started": True},
+                "health": {"profile": name, "running": True},
+            }
+
+        monkeypatch.setattr(web_server, "_activate_profile_lifecycle", fake_lifecycle, raising=False)
+
+        resp = self.client.post("/api/profiles/active", json={"name": "default"})
+
+        assert resp.status_code == 200
+        assert calls == ["default"]
+        data = resp.json()
+        assert data["active"] == "default"
+        assert data["lifecycle"]["previous_profile"] == "planning"
+        assert data["lifecycle"]["stopped_gateways"] == [{"profile": "planning", "stopped": True}]
+        assert data["lifecycle"]["gateway_start"]["profile"] == "default"
+        assert data["lifecycle"]["health"]["running"] is True
 
     def test_profiles_set_active_unknown_404(self):
         resp = self.client.post("/api/profiles/active", json={"name": "ghost"})

@@ -657,7 +657,7 @@ function ensureWslWindowsFonts() {
     )
     rememberLog(`[fonts] wired WSL Windows fonts for renderer: ${fontsDir}`)
 
-    const cache = spawn('fc-cache', ['-f', fontsDir], { detached: true, stdio: 'ignore' })
+    const cache = spawn('fc-cache', ['-f', fontsDir], { detached: true, stdio: 'ignore', windowsHide: true })
     cache.on('error', () => undefined)
     cache.unref()
   } catch (error) {
@@ -1139,7 +1139,8 @@ function runGit(args, options = {}) {
     const child = spawn(resolveGitBinary(), IS_WINDOWS ? ['-c', 'windows.appendAtomically=false', ...args] : args, {
       cwd: options.cwd,
       env: { ...process.env, ...(options.env || {}), GIT_TERMINAL_PROMPT: '0' },
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
     })
 
     let stdout = ''
@@ -1356,7 +1357,7 @@ async function applyUpdates(opts = {}) {
       },
       detached: true,
       stdio: 'ignore',
-      windowsHide: false
+      windowsHide: true
     })
     child.unref()
 
@@ -1390,7 +1391,8 @@ function runStreamedUpdate(command, args, { cwd, env, stage } = {}) {
       child = spawn(command, args, {
         cwd,
         env: { ...process.env, ...(env || {}) },
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
       })
     } catch (err) {
       resolve({ code: 1, error: err.message })
@@ -1549,7 +1551,7 @@ fi
     return { ok: true, backendUpdated: true, rebuiltApp }
   }
 
-  const child = spawn('/bin/bash', [scriptPath], { detached: true, stdio: 'ignore' })
+  const child = spawn('/bin/bash', [scriptPath], { detached: true, stdio: 'ignore', windowsHide: true })
   child.unref()
   rememberLog(`[updates] launched mac swap+relaunch: ${scriptPath} (${rebuiltApp} -> ${targetApp})`)
 
@@ -2302,7 +2304,7 @@ function fetchHtmlTitleWithCurl(rawUrl) {
       '--raw',
       url
     ]
-    const child = spawn('curl', args, { stdio: ['ignore', 'pipe', 'ignore'] })
+    const child = spawn('curl', args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
     const chunks = []
     let bytes = 0
 
@@ -3779,7 +3781,8 @@ async function startHermes() {
         HERMES_WEB_DIST: webDist
       },
       shell: backend.shell,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
     })
 
     hermesProcess.stdout.on('data', rememberLog)

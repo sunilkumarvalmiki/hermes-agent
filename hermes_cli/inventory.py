@@ -36,6 +36,18 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Optional
 
+DISABLED_GOOGLE_GEMINI_PROVIDERS = frozenset(
+    {
+        "gemini",
+        "google",
+        "google-ai-studio",
+        "google-gemini",
+        "google-gemini-cli",
+        "gemini-cli",
+        "gemini-oauth",
+    }
+)
+
 
 # ─── Public types ───────────────────────────────────────────────────────
 
@@ -150,9 +162,11 @@ def build_models_payload(
         custom_providers=ctx.custom_providers,
         max_models=max_models,
     )
+    rows = _filter_disabled_google_gemini_rows(rows)
 
     if include_unconfigured:
         rows = list(rows) + _append_unconfigured_rows(rows, ctx)
+        rows = _filter_disabled_google_gemini_rows(rows)
     if picker_hints:
         _apply_picker_hints(rows)
     if canonical_order:
@@ -167,6 +181,65 @@ def build_models_payload(
         "model": ctx.current_model,
         "provider": ctx.current_provider,
     }
+
+
+def is_disabled_google_gemini_provider(provider: str | None) -> bool:
+    slug = (provider or "").strip().lower()
+    return slug in DISABLED_GOOGLE_GEMINI_PROVIDERS
+
+
+def is_disabled_google_gemini_model(model: str | None) -> bool:
+    value = (model or "").strip().lower()
+    if not value:
+        return False
+    return (
+        value.startswith("google/")
+        or value.startswith("gemini-")
+        or value.startswith("models/gemini-")
+        or "/gemini-" in value
+    )
+
+
+def _model_id(model: object) -> str:
+    if isinstance(model, str):
+        return model
+    if isinstance(model, dict):
+        for key in ("id", "model", "name"):
+            value = model.get(key)
+            if value:
+                return str(value)
+        return ""
+    return str(model) if model is not None else ""
+
+
+def _filter_disabled_google_gemini_rows(rows: list[dict]) -> list[dict]:
+    filtered: list[dict] = []
+    for row in rows:
+        slug = str(row.get("slug", "")).strip().lower()
+        if is_disabled_google_gemini_provider(slug):
+            continue
+
+        models = row.get("models")
+        if isinstance(models, list):
+            next_models = []
+            for raw_model in models:
+                model = _model_id(raw_model)
+                if not model or is_disabled_google_gemini_model(model):
+                    continue
+                next_models.append(model)
+            row = dict(row)
+            row["models"] = next_models
+            row["total_models"] = len(next_models)
+            capabilities = row.get("capabilities")
+            if isinstance(capabilities, dict):
+                row["capabilities"] = {
+                    key: value
+                    for key, value in capabilities.items()
+                    if not is_disabled_google_gemini_model(str(key))
+                }
+
+        filtered.append(row)
+    return filtered
 
 
 def _apply_capabilities(rows: list[dict]) -> None:
@@ -189,7 +262,10 @@ def _apply_capabilities(rows: list[dict]) -> None:
         slug = row.get("slug") or ""
         caps: dict[str, dict[str, bool]] = {}
 
-        for model in row.get("models") or []:
+        for raw_model in row.get("models") or []:
+            model = _model_id(raw_model)
+            if not model:
+                continue
             reasoning = True
             if get_model_capabilities is not None and slug:
                 try:
