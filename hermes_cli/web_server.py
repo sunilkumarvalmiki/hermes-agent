@@ -4999,6 +4999,10 @@ def _run_web_chat_turn(
     agent = AIAgent(
         **agent_kwargs,
     )
+    # Web chat embeds the agent inside the dashboard process. Keep all
+    # provider diagnostics in the HTTP response/logging path instead of
+    # writing them to the terminal that launched the dashboard.
+    agent.suppress_status_output = True
     with _WEB_CHAT_ACTIVE_AGENTS_LOCK:
         _WEB_CHAT_ACTIVE_AGENTS[session_id] = agent
     try:

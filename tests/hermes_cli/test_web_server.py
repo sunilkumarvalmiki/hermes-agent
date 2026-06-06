@@ -456,7 +456,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 400
         assert "No active chat model is configured" in resp.json()["detail"]
 
-    def test_web_chat_agent_runs_quietly(self, monkeypatch):
+    def test_web_chat_agent_suppresses_terminal_status(self, monkeypatch):
         import hermes_cli.web_server as web_server
 
         captured = {}
@@ -464,8 +464,10 @@ class TestWebServerEndpoints:
         class FakeAgent:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
+                self.suppress_status_output = False
 
             def run_conversation(self, **_kwargs):
+                captured["suppress_status_output"] = self.suppress_status_output
                 return {"final_response": "ok"}
 
         monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
@@ -483,6 +485,7 @@ class TestWebServerEndpoints:
         assert captured["model"] == "llama3.1:8b"
         assert captured["platform"] == "web_chat"
         assert captured["quiet_mode"] is True
+        assert captured["suppress_status_output"] is True
 
     def test_web_chat_message_rejects_empty_message(self):
         resp = self.client.post(
